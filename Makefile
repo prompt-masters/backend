@@ -3,3 +3,6 @@ up:
 
 down:
 	docker compose down
+
+run:
+	go build ./cmd/server && ./server
