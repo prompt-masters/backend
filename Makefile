@@ -5,4 +5,4 @@ down:
 	docker compose down
 
 run:
-	go build ./cmd/server && ./server
+	go build -o myapp ./cmd/server && ./myapp
