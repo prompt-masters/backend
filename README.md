@@ -9,6 +9,12 @@ Backend API for Prompt Masters, built with Go.
 
 ## Getting Started
 
+Prepare environment variables:
+
+```sh
+cp .env.example .env
+```
+
 Start the database:
 
 ```sh
