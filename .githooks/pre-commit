@@ -1,0 +1,4 @@
+#!/bin/sh
+
+echo "Running Prompt Masters backend pre-commit checks..."
+make check
