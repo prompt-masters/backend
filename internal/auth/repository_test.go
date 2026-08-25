@@ -31,8 +31,10 @@ func newTestRepository(t *testing.T) *PostgresRepository {
 	if err := db.Ping(); err != nil {
 		t.Fatalf("connecting to test database: %v", err)
 	}
-	if _, err := db.Exec("TRUNCATE users RESTART IDENTITY"); err != nil {
-		t.Fatalf("truncating users: %v", err)
+	// CASCADE is required: email_verification_tokens has a foreign key to
+	// users, and Postgres refuses to truncate a referenced table without it.
+	if _, err := db.Exec("TRUNCATE users, email_verification_tokens RESTART IDENTITY CASCADE"); err != nil {
+		t.Fatalf("truncating tables: %v", err)
 	}
 
 	return NewPostgresRepository(db)
