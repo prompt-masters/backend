@@ -29,6 +29,10 @@ type Repository interface {
 	// VerifyEmail spends the token with the given hash and marks its user
 	// verified, returning ErrInvalidToken or ErrTokenExpired if it cannot.
 	VerifyEmail(ctx context.Context, tokenHash []byte) (*User, error)
+
+	// FindUserByEmail returns the account with the given (already
+	// normalized) address, or ErrUserNotFound.
+	FindUserByEmail(ctx context.Context, email string) (*User, error)
 }
 
 // PostgresRepository is the Postgres-backed Repository.
@@ -174,4 +178,20 @@ func duplicateError(err error) error {
 	default:
 		return nil
 	}
+}
+
+// FindUserByEmail returns the account with the given address, or
+// ErrUserNotFound. The address is matched exactly: emails are lowercased
+// before they are stored, so callers must normalize before looking up.
+func (r *PostgresRepository) FindUserByEmail(ctx context.Context, email string) (*User, error) {
+	const query = `SELECT ` + userColumns + ` FROM users WHERE email = $1`
+
+	user, err := scanUser(r.db.QueryRowContext(ctx, query, email))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("finding user by email: %w", err)
+	}
+	return user, nil
 }

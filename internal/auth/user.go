@@ -19,7 +19,20 @@ var (
 	// spent. They are deliberately indistinguishable to a caller.
 	ErrInvalidToken = errors.New("verification token is invalid")
 	ErrTokenExpired = errors.New("verification token has expired")
+
+	// ErrUserNotFound is a repository-level miss.
+	ErrUserNotFound = errors.New("user not found")
+
+	// ErrInvalidCredentials is returned for every failed login, whatever the
+	// reason.
+	ErrInvalidCredentials = errors.New("invalid credentials")
 )
+
+// LoginInput is the raw, untrusted input to a login attempt.
+type LoginInput struct {
+	Email    string
+	Password string
+}
 
 // User is a registered account. PasswordHash never leaves the process: it is
 // tagged json:"-" so it cannot be serialized into a response by accident.

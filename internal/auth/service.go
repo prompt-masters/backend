@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -26,12 +28,21 @@ const (
 type Service struct {
 	repo       Repository
 	bcryptCost int
+
+	// decoyHash is compared against when a login names an address that does
+	// not exist, so that path spends the same time in bcrypt as a real one.
+	decoyHash []byte
 }
 
 // NewService builds a Service. Pass DefaultBcryptCost in production; tests
 // pass bcrypt.MinCost so they do not pay the production work factor.
 func NewService(repo Repository, bcryptCost int) *Service {
-	return &Service{repo: repo, bcryptCost: bcryptCost}
+	// Computed once at construction rather than per request; see Login.
+	decoy, err := bcrypt.GenerateFromPassword([]byte("login timing decoy"), bcryptCost)
+	if err != nil {
+		decoy = nil
+	}
+	return &Service{repo: repo, bcryptCost: bcryptCost, decoyHash: decoy}
 }
 
 // Register validates the input, hashes the password with bcrypt, and persists
@@ -117,4 +128,45 @@ func generateVerificationToken() (string, error) {
 func hashVerificationToken(rawToken string) []byte {
 	sum := sha256.Sum256([]byte(rawToken))
 	return sum[:]
+}
+
+// Login checks an email and password and returns the account.
+//
+// Every failure — unknown address, wrong password, unverified email — is
+// reported as ErrInvalidCredentials. Distinguishing them would let anyone
+// discover which addresses have accounts, and there is nothing a legitimate
+// caller could do differently in each case.
+//
+// An unknown address still pays for a bcrypt comparison, against a decoy
+// hash. Skipping it would return in microseconds where a real account takes
+// tens of milliseconds, and that gap is enough to enumerate the user base.
+func (s *Service) Login(ctx context.Context, in LoginInput) (*User, error) {
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+
+	user, err := s.repo.FindUserByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			s.spendDecoyComparison(in.Password)
+			return nil, ErrInvalidCredentials
+		}
+		return nil, fmt.Errorf("finding user by email: %w", err)
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(in.Password)) != nil {
+		return nil, ErrInvalidCredentials
+	}
+
+	// Checked after the password so an unverified account costs the same as
+	// any other failure.
+	if !user.EmailVerified {
+		return nil, ErrInvalidCredentials
+	}
+
+	return user, nil
+}
+
+func (s *Service) spendDecoyComparison(password string) {
+	if s.decoyHash != nil {
+		_ = bcrypt.CompareHashAndPassword(s.decoyHash, []byte(password))
+	}
 }

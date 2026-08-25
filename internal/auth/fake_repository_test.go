@@ -25,6 +25,9 @@ type fakeRepository struct {
 	createCalls int
 	lastCreated *User              // the user as handed to the repository
 	lastToken   *VerificationToken // the token as handed to the repository
+
+	findErr   error // when set, FindUserByEmail fails with this
+	findCalls int
 }
 
 func (f *fakeRepository) CreateUserWithVerificationToken(ctx context.Context, u *User, t *VerificationToken) (*User, error) {
@@ -82,4 +85,18 @@ func (f *fakeRepository) VerifyEmail(ctx context.Context, tokenHash []byte) (*Us
 		}
 	}
 	return nil, ErrInvalidToken
+}
+
+func (f *fakeRepository) FindUserByEmail(ctx context.Context, email string) (*User, error) {
+	f.findCalls++
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+	for _, u := range f.users {
+		if strings.EqualFold(u.Email, email) {
+			found := *u
+			return &found, nil
+		}
+	}
+	return nil, ErrUserNotFound
 }
