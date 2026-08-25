@@ -2,25 +2,35 @@ package auth
 
 import (
 	"context"
+	"encoding/hex"
 	"strings"
 	"time"
 )
 
-// fakeRepository is an in-memory Repository for service tests. It enforces
-// the same case-insensitive uniqueness the database indexes do, so service
-// behaviour under a duplicate is exercised without needing Postgres.
-type fakeRepository struct {
-	users       []*User
-	nextID      int64
-	createErr   error // when set, CreateUser fails with this instead
-	createCalls int
-	lastCreated *User // the user as handed to the repository, pre-persist
+type storedToken struct {
+	userID     int64
+	expiresAt  time.Time
+	consumedAt *time.Time
 }
 
-func (f *fakeRepository) CreateUser(ctx context.Context, u *User) (*User, error) {
+// fakeRepository is an in-memory Repository for service tests. It enforces
+// the same case-insensitive uniqueness and token rules the database does, so
+// service behaviour is exercised without needing Postgres.
+type fakeRepository struct {
+	users  []*User
+	tokens map[string]*storedToken // keyed by hex(token hash)
+	nextID int64
+
+	createErr   error // when set, CreateUserWithVerificationToken fails with this
+	createCalls int
+	lastCreated *User              // the user as handed to the repository
+	lastToken   *VerificationToken // the token as handed to the repository
+}
+
+func (f *fakeRepository) CreateUserWithVerificationToken(ctx context.Context, u *User, t *VerificationToken) (*User, error) {
 	f.createCalls++
-	snapshot := *u
-	f.lastCreated = &snapshot
+	userSnapshot, tokenSnapshot := *u, *t
+	f.lastCreated, f.lastToken = &userSnapshot, &tokenSnapshot
 
 	if f.createErr != nil {
 		return nil, f.createErr
@@ -42,6 +52,34 @@ func (f *fakeRepository) CreateUser(ctx context.Context, u *User) (*User, error)
 	stored.UpdatedAt = stored.CreatedAt
 	f.users = append(f.users, &stored)
 
+	if f.tokens == nil {
+		f.tokens = make(map[string]*storedToken)
+	}
+	f.tokens[hex.EncodeToString(t.Hash)] = &storedToken{userID: stored.ID, expiresAt: t.ExpiresAt}
+
 	created := stored
 	return &created, nil
+}
+
+func (f *fakeRepository) VerifyEmail(ctx context.Context, tokenHash []byte) (*User, error) {
+	token, ok := f.tokens[hex.EncodeToString(tokenHash)]
+	if !ok || token.consumedAt != nil {
+		return nil, ErrInvalidToken
+	}
+	if !token.expiresAt.After(time.Now()) {
+		return nil, ErrTokenExpired
+	}
+
+	now := time.Now().UTC()
+	token.consumedAt = &now
+
+	for _, u := range f.users {
+		if u.ID == token.userID {
+			u.EmailVerified = true
+			u.UpdatedAt = now
+			verified := *u
+			return &verified, nil
+		}
+	}
+	return nil, ErrInvalidToken
 }

@@ -27,10 +27,11 @@ func TestRegisterStoresABcryptHashAndNeverThePlaintext(t *testing.T) {
 	repo := &fakeRepository{}
 	in := validInput()
 
-	user, err := newTestService(repo).Register(context.Background(), in)
+	reg, err := newTestService(repo).Register(context.Background(), in)
 	if err != nil {
 		t.Fatalf("Register() error = %v, want nil", err)
 	}
+	user := reg.User
 
 	if user.PasswordHash == in.Password {
 		t.Fatal("PasswordHash is the plaintext password")
@@ -60,7 +61,7 @@ func TestRegisterSaltsEachHashIndependently(t *testing.T) {
 		t.Fatalf("second Register() error = %v", err)
 	}
 
-	if first.PasswordHash == second.PasswordHash {
+	if first.User.PasswordHash == second.User.PasswordHash {
 		t.Error("identical passwords produced identical hashes; the salt is not random")
 	}
 }
@@ -68,7 +69,7 @@ func TestRegisterSaltsEachHashIndependently(t *testing.T) {
 func TestRegisterNormalizesBeforePersisting(t *testing.T) {
 	repo := &fakeRepository{}
 
-	user, err := newTestService(repo).Register(context.Background(), RegisterInput{
+	reg, err := newTestService(repo).Register(context.Background(), RegisterInput{
 		Username: "  Alice  ",
 		Email:    "  Alice@EXAMPLE.com  ",
 		Password: "hunter2secret",
@@ -76,6 +77,7 @@ func TestRegisterNormalizesBeforePersisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register() error = %v, want nil", err)
 	}
+	user := reg.User
 
 	if user.Username != "Alice" {
 		t.Errorf("Username = %q, want %q (trimmed, casing preserved)", user.Username, "Alice")
@@ -153,10 +155,11 @@ func TestRegisterPropagatesUnexpectedRepositoryErrors(t *testing.T) {
 func TestRegisterReturnsTheUserAsPersisted(t *testing.T) {
 	repo := &fakeRepository{}
 
-	user, err := newTestService(repo).Register(context.Background(), validInput())
+	reg, err := newTestService(repo).Register(context.Background(), validInput())
 	if err != nil {
 		t.Fatalf("Register() error = %v, want nil", err)
 	}
+	user := reg.User
 
 	if user.ID == 0 {
 		t.Error("ID = 0, want the identifier assigned by the repository")
