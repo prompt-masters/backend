@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"errors"
+	"io"
 	"net/smtp"
 	"strings"
 	"testing"
@@ -201,5 +202,24 @@ func TestLogSenderRecordsTheLinkInsteadOfSending(t *testing.T) {
 	}
 	if !strings.Contains(out, "alice@example.com") {
 		t.Errorf("log does not contain the recipient; got %q", out)
+	}
+}
+
+func TestNewSenderFromConfigUsesSMTPWhenConfigured(t *testing.T) {
+	sender := NewSenderFromConfig(testConfig(), io.Discard)
+
+	if _, ok := sender.(*SMTPSender); !ok {
+		t.Errorf("got %T, want *SMTPSender for a complete config", sender)
+	}
+}
+
+func TestNewSenderFromConfigFallsBackToLoggingWhenUnconfigured(t *testing.T) {
+	incomplete := testConfig()
+	incomplete.Host = ""
+
+	sender := NewSenderFromConfig(incomplete, io.Discard)
+
+	if _, ok := sender.(*LogSender); !ok {
+		t.Errorf("got %T, want *LogSender when SMTP is not configured", sender)
 	}
 }

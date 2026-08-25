@@ -150,3 +150,14 @@ func generateMessageID(from string) (string, error) {
 	}
 	return "<" + hex.EncodeToString(b) + "@" + domain + ">", nil
 }
+
+// NewSenderFromConfig returns an SMTPSender when cfg is complete, and a
+// LogSender writing to fallback when it is not. A missing SMTP server is a
+// development convenience rather than a startup failure: registration still
+// works and the link is recoverable from the log.
+func NewSenderFromConfig(cfg Config, fallback io.Writer) Sender {
+	if err := cfg.Validate(); err != nil {
+		return NewLogSender(fallback)
+	}
+	return NewSMTPSender(cfg)
+}
