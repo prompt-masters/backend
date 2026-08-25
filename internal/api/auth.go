@@ -16,6 +16,7 @@ import (
 
 	"github.com/prompt-masters/backend/internal/auth"
 	"github.com/prompt-masters/backend/internal/mail"
+	"github.com/prompt-masters/backend/internal/util"
 )
 
 const (
@@ -33,22 +34,25 @@ const (
 type Registrar interface {
 	Register(ctx context.Context, in auth.RegisterInput) (*auth.Registration, error)
 	VerifyEmail(ctx context.Context, rawToken string) (*auth.User, error)
+	Login(ctx context.Context, in auth.LoginInput) (*auth.User, error)
 }
 
 // AuthHandler serves registration and email verification.
 type AuthHandler struct {
 	svc     Registrar
 	sender  mail.Sender
+	tokens  *util.TokenIssuer
 	baseURL string
 	logger  *log.Logger
 }
 
 // NewAuthHandler builds the handler. baseURL is the public origin used to
 // construct verification links, e.g. "https://api.example.com".
-func NewAuthHandler(svc Registrar, sender mail.Sender, baseURL string, logger *log.Logger) *AuthHandler {
+func NewAuthHandler(svc Registrar, sender mail.Sender, tokens *util.TokenIssuer, baseURL string, logger *log.Logger) *AuthHandler {
 	return &AuthHandler{
 		svc:     svc,
 		sender:  sender,
+		tokens:  tokens,
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		logger:  logger,
 	}
@@ -57,6 +61,69 @@ func NewAuthHandler(svc Registrar, sender mail.Sender, baseURL string, logger *l
 func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/register", h.register)
 	mux.HandleFunc("GET "+verifyEmailPath, h.verifyEmail)
+	mux.HandleFunc("POST /api/v1/auth/login", h.login)
+}
+
+type loginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type loginResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	ExpiresIn   int    `json:"expires_in"`
+}
+
+// login exchanges an email and password for an access token.
+//
+// Only a request we could not read at all is a 400; anything that got as far
+// as a credential check and failed is a 401 with a single generic message,
+// whether the address is unknown, the password wrong, or the email
+// unverified. Telling them apart would let anyone map which addresses have
+// accounts.
+func (h *AuthHandler) login(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, h.logger, http.StatusBadRequest, CodeMalformedRequest, err.Error())
+		return
+	}
+
+	user, err := h.svc.Login(r.Context(), auth.LoginInput{
+		Email:    req.Email,
+		Password: req.Password,
+	})
+	if err != nil {
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			h.writeUnauthorized(w)
+			return
+		}
+		writeInternalError(w, h.logger, err)
+		return
+	}
+
+	token, err := h.tokens.Issue(util.TokenSubject{
+		UserID:   user.ID,
+		Username: user.Username,
+		Email:    user.Email,
+	})
+	if err != nil {
+		writeInternalError(w, h.logger, err)
+		return
+	}
+
+	writeJSON(w, h.logger, http.StatusOK, loginResponse{
+		AccessToken: token,
+		TokenType:   "Bearer",
+		ExpiresIn:   int(h.tokens.TTL().Seconds()),
+	})
+}
+
+// writeUnauthorized sends the single response every failed login gets. RFC
+// 9110 requires a 401 to name the scheme the client should authenticate with.
+func (h *AuthHandler) writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Bearer realm="api"`)
+	writeError(w, h.logger, http.StatusUnauthorized, CodeInvalidCredentials, "Email or password is incorrect.")
 }
 
 type registerRequest struct {

@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/prompt-masters/backend/internal/api"
 	"github.com/prompt-masters/backend/internal/auth"
 	"github.com/prompt-masters/backend/internal/mail"
+	"github.com/prompt-masters/backend/internal/util"
 )
 
 func main() {
@@ -42,11 +44,16 @@ func main() {
 		logger.Printf("warning: SMTP is not configured; verification links will be written to this log instead of emailed")
 	}
 
+	tokens, err := tokenIssuer(logger)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	baseURL := envOr("APP_BASE_URL", "http://localhost:"+port)
 	service := auth.NewService(auth.NewPostgresRepository(db), auth.DefaultBcryptCost)
 
 	mux := http.NewServeMux()
-	api.NewAuthHandler(service, sender, baseURL, logger).RegisterRoutes(mux)
+	api.NewAuthHandler(service, sender, tokens, baseURL, logger).RegisterRoutes(mux)
 
 	s := http.Server{
 		Addr:    addr,
@@ -78,6 +85,28 @@ func openDatabase(url string) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// tokenIssuer builds the access-token issuer. A missing secret is fatal:
+// there is no safe default, and starting without one would sign tokens
+// anybody could forge. A weak or placeholder secret only warns, so an
+// existing development setup keeps working.
+func tokenIssuer(logger *log.Logger) (*util.TokenIssuer, error) {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return nil, errors.New("JWT_SECRET is not set")
+	}
+	if secret == "change-me-in-production" {
+		logger.Printf("warning: JWT_SECRET is still the example value; anyone with this repository can forge tokens")
+	} else if util.SecretIsWeak(secret) {
+		logger.Printf("warning: JWT_SECRET is shorter than 32 bytes, which is weak for HS256")
+	}
+
+	ttl, err := time.ParseDuration(envOr("ACCESS_TOKEN_TTL", "15m"))
+	if err != nil {
+		return nil, fmt.Errorf("ACCESS_TOKEN_TTL: %w", err)
+	}
+	return util.NewTokenIssuer(secret, ttl)
 }
 
 func mailConfig() mail.Config {

@@ -97,6 +97,28 @@ in the background, so a slow or unreachable SMTP server never delays or fails
 a registration that already succeeded — check the server log if mail is
 misconfigured.
 
+### `POST /api/v1/auth/login`
+
+```json
+{ "email": "alice@example.com", "password": "hunter2secret" }
+```
+
+`200 OK`:
+
+```json
+{ "access_token": "eyJhbGciOiJIUzI1NiIs...", "token_type": "Bearer", "expires_in": 900 }
+```
+
+Send it back as `Authorization: Bearer <access_token>`. The token is HS256,
+signed with `JWT_SECRET`, and lasts `ACCESS_TOKEN_TTL` (default 15 minutes).
+There is no refresh token yet, so a client re-authenticates when it expires.
+
+An unknown address, a wrong password, and an unverified email all return the
+same `401 INVALID_CREDENTIALS`. That is deliberate: distinguishing them would
+let anyone discover which addresses have accounts. For the same reason a login
+for an unknown address still spends the same time hashing as a real one, so
+response time gives nothing away either.
+
 ### `GET /api/v1/auth/verify-email?token=...`
 
 Redeems the emailed link and marks the address verified. Tokens last 24 hours
@@ -119,6 +141,7 @@ Every failure has the same shape, with `fields` added for validation errors:
 | 409 | `USERNAME_ALREADY_EXISTS` | That username is taken (compared case-insensitively) |
 | 400 | `INVALID_TOKEN` | Verification token missing, unknown, or already used |
 | 410 | `TOKEN_EXPIRED` | Verification token older than 24 hours |
+| 401 | `INVALID_CREDENTIALS` | Login failed — unknown address, wrong password, or unverified email |
 | 500 | `INTERNAL_ERROR` | Anything else; the cause is logged, never returned |
 
 ### Validation rules
@@ -139,3 +162,13 @@ Leave `MAIL_HOST` empty and verification links are written to the server log
 instead of emailed, which is usually what you want locally.
 
 `APP_BASE_URL` is the public origin used to build those links.
+
+## Tokens
+
+`JWT_SECRET` is required — the server refuses to start without it. Generate
+one with `openssl rand -base64 48`. It warns rather than fails if the secret
+is still the example value or shorter than 32 bytes, so existing development
+setups keep working.
+
+`ACCESS_TOKEN_TTL` accepts any Go duration (`15m`, `24h`); it defaults to
+`15m`.

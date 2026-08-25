@@ -14,6 +14,7 @@ const (
 	CodeEmailAlreadyExists    = "EMAIL_ALREADY_EXISTS"
 	CodeUsernameAlreadyExists = "USERNAME_ALREADY_EXISTS"
 	CodeInvalidToken          = "INVALID_TOKEN"
+	CodeInvalidCredentials    = "INVALID_CREDENTIALS"
 	CodeTokenExpired          = "TOKEN_EXPIRED"
 	CodeInternalError         = "INTERNAL_ERROR"
 )

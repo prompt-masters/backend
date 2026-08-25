@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/prompt-masters/backend/internal/auth"
+	"github.com/prompt-masters/backend/internal/util"
 )
 
 const testBaseURL = "https://app.example.com"
@@ -26,6 +27,18 @@ type fakeRegistrar struct {
 	verified  *auth.User
 	verifyErr error
 	verifyArg string
+
+	loggedIn *auth.User
+	loginErr error
+	loginArg *auth.LoginInput
+}
+
+func (f *fakeRegistrar) Login(ctx context.Context, in auth.LoginInput) (*auth.User, error) {
+	f.loginArg = &in
+	if f.loginErr != nil {
+		return nil, f.loginErr
+	}
+	return f.loggedIn, nil
 }
 
 func (f *fakeRegistrar) Register(ctx context.Context, in auth.RegisterInput) (*auth.Registration, error) {
@@ -81,9 +94,24 @@ func registeredUser() *auth.Registration {
 	}
 }
 
+const testJWTSecret = "an-api-test-secret-long-enough-32b"
+
+func testIssuer(t *testing.T) *util.TokenIssuer {
+	t.Helper()
+	issuer, err := util.NewTokenIssuer(testJWTSecret, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("NewTokenIssuer() error = %v", err)
+	}
+	return issuer
+}
+
 func newTestHandler(svc Registrar, sender *fakeSender) http.Handler {
+	issuer, err := util.NewTokenIssuer(testJWTSecret, 15*time.Minute)
+	if err != nil {
+		panic(err)
+	}
 	mux := http.NewServeMux()
-	NewAuthHandler(svc, sender, testBaseURL, log.New(io.Discard, "", 0)).RegisterRoutes(mux)
+	NewAuthHandler(svc, sender, issuer, testBaseURL, log.New(io.Discard, "", 0)).RegisterRoutes(mux)
 	return mux
 }
 
