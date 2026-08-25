@@ -4,10 +4,31 @@ Backend API for Prompt Masters, built with Go.
 
 ## Requirements
 
-- Go 1.26.5+
 - Docker & Docker Compose
+- Go 1.26.5+ (only to run or test outside Docker)
 
-## Getting Started
+## Run with Docker
+
+Brings up Postgres, applies migrations, and starts the API. No Go toolchain
+needed.
+
+```sh
+cp .env.example .env
+make up
+make logs
+```
+
+The API is on `http://localhost:8080`. If 8080 or 5432 are already taken on
+your machine, set `APP_PORT` and `POSTGRES_PORT` in `.env`.
+
+`make down` stops everything.
+
+The app image is built from `Dockerfile`: a static binary on distroless, so
+the runtime has no shell and nothing to pivot with. `.env` is excluded by
+`.dockerignore` and never enters the image — compose passes configuration in
+at runtime.
+
+## Getting Started (without Docker)
 
 Prepare environment variables:
 
@@ -15,10 +36,11 @@ Prepare environment variables:
 cp .env.example .env
 ```
 
-Start the database:
+Start just the database:
 
 ```sh
-make up
+docker compose up -d postgres
+make migrate-up
 ```
 
 Run the server:

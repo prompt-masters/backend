@@ -1,0 +1,14 @@
+# .env holds real credentials and must never be baked into an image. The app
+# reads its configuration from the environment at runtime instead.
+.env
+
+.git
+.gitignore
+.idea
+.editorconfig
+Dockerfile
+.dockerignore
+docker-compose.yaml
+Makefile
+*.md
+myapp
