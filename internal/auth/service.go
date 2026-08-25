@@ -22,13 +22,6 @@ func NewService(repo Repository, bcryptCost int) *Service {
 	return &Service{repo: repo, bcryptCost: bcryptCost}
 }
 
-// Register validates the input, hashes the password with bcrypt and persists
-// the account. The plaintext password is never stored, logged or returned.
-//
-// It returns a *ValidationError if the input is malformed, ErrUsernameTaken
-// or ErrEmailTaken if the account already exists, and otherwise the user as
-// persisted. Uniqueness is decided by the database's unique indexes rather
-// than by a prior lookup, so two concurrent registrations cannot both win.
 func (s *Service) Register(ctx context.Context, in RegisterInput) (*User, error) {
 	in = normalizeRegisterInput(in)
 
