@@ -2,10 +2,13 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
@@ -31,8 +34,10 @@ func newTestRepository(t *testing.T) *PostgresRepository {
 	if err := db.Ping(); err != nil {
 		t.Fatalf("connecting to test database: %v", err)
 	}
-	if _, err := db.Exec("TRUNCATE users RESTART IDENTITY"); err != nil {
-		t.Fatalf("truncating users: %v", err)
+	// CASCADE is required: email_verification_tokens has a foreign key to
+	// users, and Postgres refuses to truncate a referenced table without it.
+	if _, err := db.Exec("TRUNCATE users, email_verification_tokens RESTART IDENTITY CASCADE"); err != nil {
+		t.Fatalf("truncating tables: %v", err)
 	}
 
 	return NewPostgresRepository(db)
@@ -41,9 +46,10 @@ func newTestRepository(t *testing.T) *PostgresRepository {
 func TestCreateUserPersistsTheRowAndReturnsItsGeneratedFields(t *testing.T) {
 	repo := newTestRepository(t)
 
-	created, err := repo.CreateUser(context.Background(), &User{
+	created, err := repo.CreateUserWithVerificationToken(context.Background(), &User{
 		Username: "Alice", Email: "alice@example.com", PasswordHash: "hash",
-	})
+		EloRating: DefaultEloRating,
+	}, testToken())
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v, want nil", err)
 	}
@@ -66,21 +72,27 @@ func TestCreateUserPersistsTheRowAndReturnsItsGeneratedFields(t *testing.T) {
 	if created.PasswordHash != "hash" {
 		t.Errorf("PasswordHash = %q, want %q", created.PasswordHash, "hash")
 	}
+	if created.EloRating != DefaultEloRating {
+		t.Errorf("EloRating = %d, want %d", created.EloRating, DefaultEloRating)
+	}
+	if created.EmailVerified {
+		t.Error("EmailVerified = true, want false for a brand new account")
+	}
 }
 
 func TestCreateUserRejectsAUsernameTakenInAnotherCase(t *testing.T) {
 	repo := newTestRepository(t)
 	ctx := context.Background()
 
-	if _, err := repo.CreateUser(ctx, &User{
+	if _, err := repo.CreateUserWithVerificationToken(ctx, &User{
 		Username: "alice", Email: "alice@example.com", PasswordHash: "hash",
-	}); err != nil {
+	}, testToken()); err != nil {
 		t.Fatalf("first CreateUser() error = %v", err)
 	}
 
-	_, err := repo.CreateUser(ctx, &User{
+	_, err := repo.CreateUserWithVerificationToken(ctx, &User{
 		Username: "ALICE", Email: "other@example.com", PasswordHash: "hash",
-	})
+	}, testToken())
 
 	if !errors.Is(err, ErrUsernameTaken) {
 		t.Fatalf("CreateUser() error = %v, want ErrUsernameTaken", err)
@@ -91,15 +103,15 @@ func TestCreateUserRejectsADuplicateEmail(t *testing.T) {
 	repo := newTestRepository(t)
 	ctx := context.Background()
 
-	if _, err := repo.CreateUser(ctx, &User{
+	if _, err := repo.CreateUserWithVerificationToken(ctx, &User{
 		Username: "alice", Email: "alice@example.com", PasswordHash: "hash",
-	}); err != nil {
+	}, testToken()); err != nil {
 		t.Fatalf("first CreateUser() error = %v", err)
 	}
 
-	_, err := repo.CreateUser(ctx, &User{
+	_, err := repo.CreateUserWithVerificationToken(ctx, &User{
 		Username: "bob", Email: "alice@example.com", PasswordHash: "hash",
-	})
+	}, testToken())
 
 	if !errors.Is(err, ErrEmailTaken) {
 		t.Fatalf("CreateUser() error = %v, want ErrEmailTaken", err)
@@ -110,15 +122,15 @@ func TestCreateUserAllowsADifferentUsernameAndEmail(t *testing.T) {
 	repo := newTestRepository(t)
 	ctx := context.Background()
 
-	if _, err := repo.CreateUser(ctx, &User{
+	if _, err := repo.CreateUserWithVerificationToken(ctx, &User{
 		Username: "alice", Email: "alice@example.com", PasswordHash: "hash",
-	}); err != nil {
+	}, testToken()); err != nil {
 		t.Fatalf("first CreateUser() error = %v", err)
 	}
 
-	if _, err := repo.CreateUser(ctx, &User{
+	if _, err := repo.CreateUserWithVerificationToken(ctx, &User{
 		Username: "bob", Email: "bob@example.com", PasswordHash: "hash",
-	}); err != nil {
+	}, testToken()); err != nil {
 		t.Fatalf("second CreateUser() error = %v, want nil", err)
 	}
 }
@@ -132,12 +144,13 @@ func TestRegisterAgainstPostgres(t *testing.T) {
 	ctx := context.Background()
 
 	const password = "hunter2secret"
-	user, err := svc.Register(ctx, RegisterInput{
+	reg, err := svc.Register(ctx, RegisterInput{
 		Username: "  Alice  ", Email: "  Alice@EXAMPLE.com  ", Password: password,
 	})
 	if err != nil {
 		t.Fatalf("Register() error = %v, want nil", err)
 	}
+	user := reg.User
 
 	var username, email, storedHash string
 	err = repo.db.QueryRowContext(ctx,
@@ -174,4 +187,15 @@ func TestRegisterAgainstPostgres(t *testing.T) {
 	if !errors.Is(err, ErrEmailTaken) {
 		t.Errorf("re-registering the email: error = %v, want ErrEmailTaken", err)
 	}
+}
+
+// testToken builds a distinct, unexpired verification token for tests that
+// only care about the user row.
+func testToken() *VerificationToken {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(b)
+	return &VerificationToken{Hash: sum[:], ExpiresAt: time.Now().Add(time.Hour)}
 }

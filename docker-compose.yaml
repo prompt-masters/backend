@@ -7,9 +7,57 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: prompters_db
     ports:
-      - "5432:5432"
+      # Override POSTGRES_PORT if 5432 is already taken on your machine.
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d prompters_db"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # Applies migrations once, then exits. The app waits for it to finish, so
+  # the schema is always current before the server accepts a request.
+  migrate:
+    image: migrate/migrate:v4.18.1
+    container_name: prompters-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    command:
+      - -path=/migrations
+      - -database=postgres://postgres:password@postgres:5432/prompters_db?sslmode=disable
+      - up
+    restart: on-failure
+
+  app:
+    build: .
+    container_name: prompters-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Picks up MAIL_* from .env when present. Leave MAIL_HOST empty and
+    # verification links are written to `docker compose logs app` instead of
+    # being emailed.
+    env_file:
+      - path: .env
+        required: false
+    # These override anything in .env: inside the compose network the
+    # database is reachable as "postgres", and the container always listens
+    # on 8080 regardless of which host port is published.
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      DATABASE_URL: postgres://postgres:password@postgres:5432/prompters_db?sslmode=disable
+      APP_BASE_URL: http://localhost:${APP_PORT:-8080}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    restart: unless-stopped
 
 volumes:
   postgres_data:
