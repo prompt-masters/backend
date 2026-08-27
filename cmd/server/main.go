@@ -38,18 +38,19 @@ func main() {
 	queries := db.New(pool)
 	userRepo := postgres.NewUserRepository(queries)
 	tokenRepo := postgres.NewVerificationTokenRepository(queries)
-	sender := mail.NewSenderFromConfig(mail.Config{
-		Host:      cfg.Mail.Host,
-		Port:      cfg.Mail.Port,
-		Username:  cfg.Mail.Username,
-		Password:  cfg.Mail.Password,
-		FromEmail: cfg.Mail.FromEmail,
-	}, os.Stderr)
+	sender := mail.NewSenderFromConfig(cfg.Mail, os.Stderr)
 
-	authService := service.NewAuthService(userRepo, tokenRepo, sender)
+	authService := service.NewAuthService(userRepo, tokenRepo, sender, service.Config{
+		JWTSecret:  cfg.JWTSecret,
+		JWTTTL:     cfg.JWTTTL,
+		AppBaseURL: cfg.AppBaseURL,
+	})
 
-	mux := http.NewServeMux()
-	api.NewAuthHandler(authService, logger).RegisterRoutes(mux)
+	mux := api.NewRouter(api.Dependencies{
+		AuthService: authService,
+		Logger:      logger,
+		JWTSecret:   cfg.JWTSecret,
+	})
 
 	s := http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),
