@@ -3,8 +3,16 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/prompt-masters/backend/internal/mail"
+)
+
+const (
+	defaultPort     = "8080"
+	defaultJWTTTL   = 24 * time.Hour
+	defaultMailPort = 587
 )
 
 type Config struct {
@@ -12,16 +20,9 @@ type Config struct {
 	Port        string
 	DatabaseURL string
 	JWTSecret   string
+	JWTTTL      time.Duration
 	AppBaseURL  string
-	Mail        MailConfig
-}
-
-type MailConfig struct {
-	Host      string
-	Port      int
-	Username  string
-	Password  string
-	FromEmail string
+	Mail        mail.Config
 }
 
 func Load() (*Config, error) {
@@ -33,9 +34,9 @@ func Load() (*Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		JWTSecret:   os.Getenv("JWT_SECRET"),
 		AppBaseURL:  os.Getenv("APP_BASE_URL"),
-		Mail: MailConfig{
+		Mail: mail.Config{
 			Host:      os.Getenv("MAIL_HOST"),
-			Port:      envInt("MAIL_PORT", 587),
+			Port:      envInt("MAIL_PORT", defaultMailPort),
 			Username:  os.Getenv("MAIL_USERNAME"),
 			Password:  os.Getenv("MAIL_PASSWORD"),
 			FromEmail: os.Getenv("MAIL_FROM_EMAIL"),
@@ -43,11 +44,19 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.Port == "" {
-		cfg.Port = "8080"
+		cfg.Port = defaultPort
 	}
 	if cfg.AppBaseURL == "" {
 		cfg.AppBaseURL = "http://localhost:" + cfg.Port
 	}
+
+	jwtTTL, err := time.ParseDuration(os.Getenv("JWT_TTL"))
+	if err != nil {
+		cfg.JWTTTL = defaultJWTTTL
+	} else {
+		cfg.JWTTTL = jwtTTL
+	}
+
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
