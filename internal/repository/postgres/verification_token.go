@@ -2,9 +2,11 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/prompt-masters/backend/internal/db"
 	"github.com/prompt-masters/backend/internal/domain"
@@ -34,6 +36,9 @@ func (r *VerificationTokenRepository) Create(ctx context.Context, userID uuid.UU
 func (r *VerificationTokenRepository) GetByToken(ctx context.Context, token string) (*domain.VerificationToken, error) {
 	t, err := r.queries.GetVerificationToken(ctx, token)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrNotFound
+		}
 		return nil, err
 	}
 	return toDomainToken(t), nil

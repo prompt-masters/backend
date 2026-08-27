@@ -2,8 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prompt-masters/backend/internal/db"
 	"github.com/prompt-masters/backend/internal/domain"
 )
@@ -25,7 +29,7 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) (*domain
 		Password: user.Password,
 	})
 	if err != nil {
-		return nil, err
+		return nil, translateCreateError(err)
 	}
 	return toDomainUser(created), nil
 }
@@ -33,7 +37,7 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) (*domain
 func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
 	user, err := r.queries.GetUserByID(ctx, pgUUID(id))
 	if err != nil {
-		return nil, err
+		return nil, translateGetError(err)
 	}
 	return toDomainUser(user), nil
 }
@@ -41,7 +45,7 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Use
 func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	user, err := r.queries.GetUserByEmail(ctx, email)
 	if err != nil {
-		return nil, err
+		return nil, translateGetError(err)
 	}
 	return toDomainUser(user), nil
 }
@@ -49,7 +53,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*domain.
 func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*domain.User, error) {
 	user, err := r.queries.GetUserByUsername(ctx, username)
 	if err != nil {
-		return nil, err
+		return nil, translateGetError(err)
 	}
 	return toDomainUser(user), nil
 }
@@ -63,6 +67,26 @@ func (r *UserRepository) UpdateEmail(ctx context.Context, id uuid.UUID, email st
 
 func (r *UserRepository) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
 	return r.queries.SetEmailVerified(ctx, pgUUID(id))
+}
+
+func translateCreateError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		switch {
+		case strings.Contains(pgErr.ConstraintName, "email"):
+			return domain.ErrEmailTaken
+		case strings.Contains(pgErr.ConstraintName, "username"):
+			return domain.ErrUsernameTaken
+		}
+	}
+	return err
+}
+
+func translateGetError(err error) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrNotFound
+	}
+	return err
 }
 
 func toDomainUser(u *db.User) *domain.User {
