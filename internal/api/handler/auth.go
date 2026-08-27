@@ -12,6 +12,7 @@ import (
 
 	"github.com/prompt-masters/backend/internal/api/dto"
 	"github.com/prompt-masters/backend/internal/api/middleware"
+	"github.com/prompt-masters/backend/internal/api/response"
 	"github.com/prompt-masters/backend/internal/domain"
 	"github.com/prompt-masters/backend/internal/service"
 )
@@ -30,7 +31,7 @@ func NewAuthHandler(svc *service.AuthService, logger *log.Logger) *AuthHandler {
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var req dto.RegisterRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, err.Error())
+		response.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -44,7 +45,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusCreated, Envelope{
+	response.WriteJSON(w, http.StatusCreated, response.Envelope{
 		"data": reg.User,
 	})
 }
@@ -52,7 +53,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req dto.LoginRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, err.Error())
+		response.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -65,7 +66,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, Envelope{
+	response.WriteJSON(w, http.StatusOK, response.Envelope{
 		"data": dto.LoginResponse{User: result.User, Token: result.Token},
 	})
 }
@@ -73,7 +74,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 	tokenValue := r.URL.Query().Get("token")
 	if tokenValue == "" {
-		WriteError(w, http.StatusBadRequest, "This verification link is not valid.")
+		response.WriteError(w, http.StatusBadRequest, "This verification link is not valid.")
 		return
 	}
 
@@ -83,15 +84,11 @@ func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, Envelope{"data": user})
+	response.WriteJSON(w, http.StatusOK, response.Envelope{"data": user})
 }
 
 func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
-	userID, ok := middleware.UserIDFromContext(r.Context())
-	if !ok {
-		WriteError(w, http.StatusUnauthorized, "A valid access token is required.")
-		return
-	}
+	userID, _ := middleware.UserIDFromContext(r.Context())
 
 	user, err := h.svc.Me(r.Context(), userID)
 	if err != nil {
@@ -99,13 +96,13 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, Envelope{"data": user})
+	response.WriteJSON(w, http.StatusOK, response.Envelope{"data": user})
 }
 
 func (h *AuthHandler) writeError(w http.ResponseWriter, err error) {
 	var vErr *service.ValidationError
 	if errors.As(err, &vErr) {
-		WriteJSON(w, http.StatusUnprocessableEntity, Envelope{
+		response.WriteJSON(w, http.StatusUnprocessableEntity, response.Envelope{
 			"error":  "Validation failed",
 			"fields": vErr.Fields,
 		})
@@ -114,20 +111,20 @@ func (h *AuthHandler) writeError(w http.ResponseWriter, err error) {
 
 	switch {
 	case errors.Is(err, domain.ErrEmailTaken):
-		WriteError(w, http.StatusConflict, "That email address is already registered.")
+		response.WriteError(w, http.StatusConflict, "That email address is already registered.")
 	case errors.Is(err, domain.ErrUsernameTaken):
-		WriteError(w, http.StatusConflict, "That username is already taken.")
+		response.WriteError(w, http.StatusConflict, "That username is already taken.")
 	case errors.Is(err, domain.ErrInvalidCredentials):
-		WriteError(w, http.StatusUnauthorized, "Incorrect email or password.")
+		response.WriteError(w, http.StatusUnauthorized, "Incorrect email or password.")
 	case errors.Is(err, domain.ErrEmailNotVerified):
-		WriteError(w, http.StatusForbidden, "Please verify your email address before signing in.")
+		response.WriteError(w, http.StatusForbidden, "Please verify your email address before signing in.")
 	case errors.Is(err, domain.ErrInvalidVerificationToken):
-		WriteError(w, http.StatusBadRequest, "This verification link is not valid or has already been used.")
+		response.WriteError(w, http.StatusBadRequest, "This verification link is not valid or has already been used.")
 	case errors.Is(err, domain.ErrVerificationTokenExpired):
-		WriteError(w, http.StatusGone, "This verification link has expired.")
+		response.WriteError(w, http.StatusGone, "This verification link has expired.")
 	default:
 		h.logger.Printf("internal error: %v", err)
-		WriteError(w, http.StatusInternalServerError, "An unexpected error occurred.")
+		response.WriteError(w, http.StatusInternalServerError, "An unexpected error occurred.")
 	}
 }
 

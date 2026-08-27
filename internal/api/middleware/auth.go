@@ -3,11 +3,11 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/prompt-masters/backend/internal/api/response"
 	"github.com/prompt-masters/backend/internal/util"
 )
 
@@ -21,7 +21,7 @@ func RequireAuth(secret string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userID, err := userIDFromRequest(r, secret)
 		if err != nil {
-			writeUnauthorized(w)
+			response.WriteError(w, http.StatusUnauthorized, "A valid access token is required.")
 			return
 		}
 
@@ -44,10 +44,4 @@ func userIDFromRequest(r *http.Request, secret string) (uuid.UUID, error) {
 	}
 
 	return util.ParseJWT(secret, value)
-}
-
-func writeUnauthorized(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
-	json.NewEncoder(w).Encode(map[string]string{"error": "A valid access token is required."})
 }

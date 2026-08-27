@@ -1,4 +1,6 @@
-package handler
+// Package response provides the JSON envelope helpers used by handlers and
+// middleware to write responses.
+package response
 
 import (
 	"encoding/json"
