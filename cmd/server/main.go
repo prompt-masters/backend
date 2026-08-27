@@ -1,46 +1,35 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"log"
 	"net"
 	"net/http"
-	"os"
 
-	"github.com/joho/godotenv"
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prompt-masters/backend/internal/config"
 )
 
 func main() {
-	// loading env file
-	err := godotenv.Load()
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	host := os.Getenv("HOST")
-	dbURL := os.Getenv("DATABASE_URL")
-
-	db, err := sql.Open("postgres", dbURL)
+	pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("Invalid connection string format: %v", err)
+		log.Fatalf("Unable to create connection pool: %v", err)
 	}
-	defer db.Close()
+	defer pool.Close()
 
-	err = db.Ping()
-	if err != nil {
+	if err := pool.Ping(context.Background()); err != nil {
 		log.Fatalf("Database connection failed: %v", err)
 	}
 
 	mux := http.NewServeMux()
 
 	s := http.Server{
-		Addr:    net.JoinHostPort(host, port),
+		Addr:    net.JoinHostPort(cfg.Host, cfg.Port),
 		Handler: mux,
 	}
 
