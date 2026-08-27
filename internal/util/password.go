@@ -1,17 +1,12 @@
-package auth
+package util
 
-import (
-	"github.com/alexedwards/argon2id"
-)
+import "github.com/alexedwards/argon2id"
 
-func Hash(password string) (string, error) {
-	hashedPassword, err := argon2id.CreateHash(password, argon2id.DefaultParams)
-	if err != nil {
-		return "", err
-	}
-	return hashedPassword, nil
+func HashPassword(plain string) (string, error) {
+	return argon2id.CreateHash(plain, argon2id.DefaultParams)
 }
 
-func Check(password, hash string) (bool, error) {
-	return argon2id.ComparePasswordAndHash(password, hash)
+func CheckPassword(hashed, plain string) bool {
+	ok, _ := argon2id.ComparePasswordAndHash(plain, hashed)
+	return ok
 }

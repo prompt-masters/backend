@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prompt-masters/backend/internal/config"
@@ -31,6 +32,10 @@ func main() {
 	s := http.Server{
 		Addr:    net.JoinHostPort(cfg.Host, cfg.Port),
 		Handler: mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	log.Printf("Running server on %s", s.Addr)
