@@ -17,30 +17,14 @@ services:
       timeout: 3s
       retries: 15
 
-  # Applies migrations once, then exits. The app waits for it to finish, so
-  # the schema is always current before the server accepts a request.
-  migrate:
-    image: migrate/migrate:v4.18.1
-    container_name: prompters-migrate
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./migrations:/migrations:ro
-    command:
-      - -path=/migrations
-      - -database=postgres://postgres:password@postgres:5432/prompters_db?sslmode=disable
-      - up
-    restart: on-failure
-
+  # Apply migrations first: make migrate-up (goose) against the running
+  # database before starting the app, or run `make migrate-up` after up.
   app:
     build: .
     container_name: prompters-api
     depends_on:
       postgres:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     # Picks up MAIL_* from .env when present. Leave MAIL_HOST empty and
     # verification links are written to `docker compose logs app` instead of
     # being emailed.
