@@ -46,15 +46,11 @@ func main() {
 		AppBaseURL: cfg.AppBaseURL,
 	})
 
-	mux := api.NewRouter(api.Dependencies{
-		AuthService: authService,
-		Logger:      logger,
-		JWTSecret:   cfg.JWTSecret,
-	})
+	server := api.NewServer(authService, logger, cfg.JWTSecret)
 
 	s := http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),
-		Handler:           mux,
+		Handler:           server.Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
