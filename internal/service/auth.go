@@ -12,18 +12,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/prompt-masters/backend/internal/domain"
 	"github.com/prompt-masters/backend/internal/mail"
 	"github.com/prompt-masters/backend/internal/repository"
 	"github.com/prompt-masters/backend/internal/util"
-)
-
-var (
-	ErrUsernameTaken      = errors.New("username already taken")
-	ErrEmailTaken         = errors.New("email already registered")
-	ErrInvalidToken       = errors.New("verification token is invalid")
-	ErrTokenExpired       = errors.New("verification token has expired")
-	ErrInvalidCredentials = errors.New("invalid credentials")
 )
 
 const (
@@ -33,8 +26,8 @@ const (
 	PasswordMaxBytes  = 72
 	EmailMaxLength    = 254
 
-	TokenTTL          = 24 * time.Hour
-	tokenBytes        = 32
+	TokenTTL   = 24 * time.Hour
+	tokenBytes = 32
 )
 
 var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
@@ -45,6 +38,12 @@ type ValidationError struct {
 
 func (e *ValidationError) Error() string {
 	return "validation failed"
+}
+
+type Config struct {
+	JWTSecret  string
+	JWTTTL     time.Duration
+	AppBaseURL string
 }
 
 type RegisterInput struct {
@@ -58,21 +57,33 @@ type Registration struct {
 	VerificationToken string
 }
 
+type LoginInput struct {
+	Email    string
+	Password string
+}
+
+type LoginResult struct {
+	User  *domain.User
+	Token string
+}
+
 type AuthService struct {
 	users  repository.UserRepository
 	tokens repository.VerificationTokenRepository
 	sender mail.Sender
+	cfg    Config
 }
 
 func NewAuthService(
 	users repository.UserRepository,
 	tokens repository.VerificationTokenRepository,
 	sender mail.Sender,
+	cfg Config,
 ) *AuthService {
-	return &AuthService{users: users, tokens: tokens, sender: sender}
+	return &AuthService{users: users, tokens: tokens, sender: sender, cfg: cfg}
 }
 
-func (s *AuthService) Register(ctx context.Context, in RegisterInput, baseURL string) (*Registration, error) {
+func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*Registration, error) {
 	in = normalizeInput(in)
 
 	if err := validateInput(in); err != nil {
@@ -92,7 +103,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput, baseURL st
 
 	created, err := s.users.Create(ctx, user)
 	if err != nil {
-		return nil, fmt.Errorf("creating user: %w", err)
+		return nil, err
 	}
 
 	rawToken, err := generateToken()
@@ -105,7 +116,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput, baseURL st
 		return nil, fmt.Errorf("storing verification token: %w", err)
 	}
 
-	link := strings.TrimSuffix(baseURL, "/") + "/api/v1/auth/verify-email?token=" + rawToken
+	link := strings.TrimSuffix(s.cfg.AppBaseURL, "/") + "/api/v1/auth/verify-email?token=" + rawToken
 	go func() {
 		_ = s.sender.SendVerification(context.Background(), created.Email, created.Username, link)
 	}()
@@ -113,18 +124,51 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput, baseURL st
 	return &Registration{User: created, VerificationToken: rawToken}, nil
 }
 
+func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, error) {
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+	if err := validateLoginInput(email, in.Password); err != nil {
+		return nil, err
+	}
+
+	user, err := s.users.GetByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, domain.ErrInvalidCredentials
+		}
+		return nil, fmt.Errorf("looking up user: %w", err)
+	}
+
+	if !util.CheckPassword(user.Password, in.Password) {
+		return nil, domain.ErrInvalidCredentials
+	}
+
+	if !user.EmailVerified {
+		return nil, domain.ErrEmailNotVerified
+	}
+
+	token, err := util.GenerateJWT(s.cfg.JWTSecret, user.ID, s.cfg.JWTTTL)
+	if err != nil {
+		return nil, fmt.Errorf("generating access token: %w", err)
+	}
+
+	return &LoginResult{User: user, Token: token}, nil
+}
+
 func (s *AuthService) VerifyEmail(ctx context.Context, rawToken string) (*domain.User, error) {
 	if rawToken == "" {
-		return nil, ErrInvalidToken
+		return nil, domain.ErrInvalidVerificationToken
 	}
 
 	token, err := s.tokens.GetByToken(ctx, rawToken)
 	if err != nil {
-		return nil, ErrInvalidToken
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, domain.ErrInvalidVerificationToken
+		}
+		return nil, fmt.Errorf("looking up verification token: %w", err)
 	}
 
 	if time.Now().After(token.ExpiresAt) {
-		return nil, ErrTokenExpired
+		return nil, domain.ErrVerificationTokenExpired
 	}
 
 	if err := s.users.SetEmailVerified(ctx, token.UserID); err != nil {
@@ -136,6 +180,14 @@ func (s *AuthService) VerifyEmail(ctx context.Context, rawToken string) (*domain
 	}
 
 	return s.users.GetByID(ctx, token.UserID)
+}
+
+func (s *AuthService) Me(ctx context.Context, userID uuid.UUID) (*domain.User, error) {
+	user, err := s.users.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 func generateToken() (string, error) {
@@ -165,6 +217,22 @@ func validateInput(in RegisterInput) error {
 	}
 	if msg := validatePassword(in.Password); msg != "" {
 		fields["password"] = msg
+	}
+
+	if len(fields) == 0 {
+		return nil
+	}
+	return &ValidationError{Fields: fields}
+}
+
+func validateLoginInput(email, password string) error {
+	fields := make(map[string]string)
+
+	if strings.TrimSpace(email) == "" {
+		fields["email"] = "is required"
+	}
+	if password == "" {
+		fields["password"] = "is required"
 	}
 
 	if len(fields) == 0 {
