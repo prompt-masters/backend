@@ -17,6 +17,7 @@ type Querier interface {
 	DeleteVerificationToken(ctx context.Context, token string) error
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error)
+	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	GetVerificationToken(ctx context.Context, token string) (*VerificationToken, error)
 	SetEmailVerified(ctx context.Context, id pgtype.UUID) error
 	UpdateUserEmail(ctx context.Context, arg UpdateUserEmailParams) error
