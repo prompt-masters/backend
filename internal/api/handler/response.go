@@ -1,4 +1,4 @@
-package api
+package handler
 
 import (
 	"encoding/json"
@@ -15,8 +15,4 @@ func WriteJSON(w http.ResponseWriter, status int, data Envelope) error {
 
 func WriteError(w http.ResponseWriter, status int, msg string) {
 	WriteJSON(w, status, Envelope{"error": msg})
-}
-
-func WriteSuccess(w http.ResponseWriter, data any) error {
-	return WriteJSON(w, http.StatusOK, Envelope{"data": data})
 }
