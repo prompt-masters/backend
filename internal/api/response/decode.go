@@ -6,13 +6,12 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"strings"
 )
 
 const maxBodySize = 16 << 10
 
-// DecodeJSON reads a single JSON object of maxBodySize bytes into dst,
-// rejecting unknown fields and non-JSON content types.
+// DecodeJSON reads a single JSON object of up to maxBodySize bytes into dst.
+// Unknown fields are ignored; a second JSON value after the object is rejected.
 func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	if err := requireJSONContentType(r); err != nil {
 		return err
@@ -21,7 +20,6 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 
 	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
 
 	if err := dec.Decode(dst); err != nil {
 		return describeDecodeError(err)
@@ -61,8 +59,6 @@ func describeDecodeError(err error) error {
 		return errors.New("request body is too large")
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return errors.New("request body is empty or truncated")
-	case strings.HasPrefix(err.Error(), "json: unknown field "):
-		return errors.New("request body contains an unrecognised field")
 	default:
 		return errors.New("request body could not be read")
 	}
