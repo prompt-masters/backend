@@ -1,62 +1,31 @@
-// Package api holds the HTTP layer: request decoding, domain-error mapping
-// and JSON responses. It owns no business rules of its own.
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"mime"
 	"net/http"
-	"net/url"
 	"strings"
-	"time"
 
-	"github.com/prompt-masters/backend/internal/auth"
-	"github.com/prompt-masters/backend/internal/mail"
+	"github.com/prompt-masters/backend/internal/service"
 )
 
-const (
-	// maxRegisterBody caps the request body. The largest legitimate
-	// registration is a few hundred bytes.
-	maxRegisterBody = 16 << 10
+const maxBodySize = 16 << 10
 
-	// verificationSendTimeout bounds the background SMTP conversation.
-	verificationSendTimeout = 30 * time.Second
-
-	verifyEmailPath = "/api/v1/auth/verify-email"
-)
-
-// Registrar is the slice of *auth.Service this handler needs.
-type Registrar interface {
-	Register(ctx context.Context, in auth.RegisterInput) (*auth.Registration, error)
-	VerifyEmail(ctx context.Context, rawToken string) (*auth.User, error)
-}
-
-// AuthHandler serves registration and email verification.
 type AuthHandler struct {
-	svc     Registrar
-	sender  mail.Sender
-	baseURL string
-	logger  *log.Logger
+	svc    *service.AuthService
+	logger *log.Logger
 }
 
-// NewAuthHandler builds the handler. baseURL is the public origin used to
-// construct verification links, e.g. "https://api.example.com".
-func NewAuthHandler(svc Registrar, sender mail.Sender, baseURL string, logger *log.Logger) *AuthHandler {
-	return &AuthHandler{
-		svc:     svc,
-		sender:  sender,
-		baseURL: strings.TrimSuffix(baseURL, "/"),
-		logger:  logger,
-	}
+func NewAuthHandler(svc *service.AuthService, logger *log.Logger) *AuthHandler {
+	return &AuthHandler{svc: svc, logger: logger}
 }
 
 func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/register", h.register)
-	mux.HandleFunc("GET "+verifyEmailPath, h.verifyEmail)
+	mux.HandleFunc("GET /api/v1/auth/verify-email", h.verifyEmail)
 }
 
 type registerRequest struct {
@@ -65,126 +34,79 @@ type registerRequest struct {
 	Password string `json:"password"`
 }
 
-type registerResponse struct {
-	UserID    int64  `json:"user_id"`
-	Username  string `json:"username"`
-	Email     string `json:"email"`
-	EloRating int    `json:"elo_rating"`
-}
-
-type verifyEmailResponse struct {
-	UserID        int64  `json:"user_id"`
-	Username      string `json:"username"`
-	Email         string `json:"email"`
-	EloRating     int    `json:"elo_rating"`
-	EmailVerified bool   `json:"email_verified"`
-}
-
 func (h *AuthHandler) register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, h.logger, http.StatusBadRequest, CodeMalformedRequest, err.Error())
+		WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	reg, err := h.svc.Register(r.Context(), auth.RegisterInput{
+	reg, err := h.svc.Register(r.Context(), service.RegisterInput{
 		Username: req.Username,
 		Email:    req.Email,
 		Password: req.Password,
-	})
+	}, r.Header.Get("Origin"))
 	if err != nil {
-		h.writeRegisterError(w, err)
+		h.writeError(w, err)
 		return
 	}
 
-	// The account exists; the email is a follow-up. Dispatching it in the
-	// background keeps a slow or broken SMTP server from delaying or failing
-	// a registration that already succeeded.
-	h.dispatchVerificationEmail(reg)
-
-	writeJSON(w, h.logger, http.StatusCreated, registerResponse{
-		UserID:    reg.User.ID,
-		Username:  reg.User.Username,
-		Email:     reg.User.Email,
-		EloRating: reg.User.EloRating,
+	WriteJSON(w, http.StatusCreated, Envelope{
+		"data": reg.User,
 	})
-}
-
-func (h *AuthHandler) writeRegisterError(w http.ResponseWriter, err error) {
-	var vErr *auth.ValidationError
-	switch {
-	case errors.As(err, &vErr):
-		writeJSON(w, h.logger, http.StatusUnprocessableEntity, errorResponse{
-			ErrorCode: CodeValidationError,
-			Message:   "The submitted values are not valid.",
-			Fields:    vErr.Fields,
-		})
-	case errors.Is(err, auth.ErrEmailTaken):
-		writeError(w, h.logger, http.StatusConflict, CodeEmailAlreadyExists, "That email address is already registered.")
-	case errors.Is(err, auth.ErrUsernameTaken):
-		writeError(w, h.logger, http.StatusConflict, CodeUsernameAlreadyExists, "That username is already taken.")
-	default:
-		writeInternalError(w, h.logger, err)
-	}
-}
-
-// dispatchVerificationEmail sends the verification link on its own goroutine,
-// with a context independent of the request: the request's context is
-// cancelled the moment the response is written.
-func (h *AuthHandler) dispatchVerificationEmail(reg *auth.Registration) {
-	link := h.baseURL + verifyEmailPath + "?token=" + url.QueryEscape(reg.VerificationToken)
-	to, username := reg.User.Email, reg.User.Username
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), verificationSendTimeout)
-		defer cancel()
-
-		if err := h.sender.SendVerification(ctx, to, username, link); err != nil {
-			// Nothing to tell the client — they already have their 201. The
-			// account exists but is unverifiable until the mail is retried.
-			h.logger.Printf("sending verification email to %s: %v", to, err)
-		}
-	}()
 }
 
 func (h *AuthHandler) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
-		writeError(w, h.logger, http.StatusBadRequest, CodeInvalidToken, "This verification link is not valid.")
+		WriteError(w, http.StatusBadRequest, "This verification link is not valid.")
 		return
 	}
 
 	user, err := h.svc.VerifyEmail(r.Context(), token)
 	if err != nil {
 		switch {
-		case errors.Is(err, auth.ErrInvalidToken):
-			writeError(w, h.logger, http.StatusBadRequest, CodeInvalidToken, "This verification link is not valid or has already been used.")
-		case errors.Is(err, auth.ErrTokenExpired):
-			writeError(w, h.logger, http.StatusGone, CodeTokenExpired, "This verification link has expired.")
+		case errors.Is(err, service.ErrInvalidToken):
+			WriteError(w, http.StatusBadRequest, "This verification link is not valid or has already been used.")
+		case errors.Is(err, service.ErrTokenExpired):
+			WriteError(w, http.StatusGone, "This verification link has expired.")
 		default:
-			writeInternalError(w, h.logger, err)
+			h.logger.Printf("internal error: %v", err)
+			WriteError(w, http.StatusInternalServerError, "An unexpected error occurred.")
 		}
 		return
 	}
 
-	writeJSON(w, h.logger, http.StatusOK, verifyEmailResponse{
-		UserID:        user.ID,
-		Username:      user.Username,
-		Email:         user.Email,
-		EloRating:     user.EloRating,
-		EmailVerified: user.EmailVerified,
-	})
+	WriteJSON(w, http.StatusOK, Envelope{"data": user})
 }
 
-// decodeJSON reads a single JSON object into dst. It rejects the wrong
-// content type, an oversized body, unknown fields and trailing data, so a
-// caller can treat any error as a malformed request.
+func (h *AuthHandler) writeError(w http.ResponseWriter, err error) {
+	var vErr *service.ValidationError
+	if errors.As(err, &vErr) {
+		WriteJSON(w, http.StatusUnprocessableEntity, Envelope{
+			"error":  "Validation failed",
+			"fields": vErr.Fields,
+		})
+		return
+	}
+
+	switch {
+	case errors.Is(err, service.ErrEmailTaken):
+		WriteError(w, http.StatusConflict, "That email address is already registered.")
+	case errors.Is(err, service.ErrUsernameTaken):
+		WriteError(w, http.StatusConflict, "That username is already taken.")
+	default:
+		h.logger.Printf("internal error: %v", err)
+		WriteError(w, http.StatusInternalServerError, "An unexpected error occurred.")
+	}
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	if err := requireJSONContentType(r); err != nil {
 		return err
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxRegisterBody)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -193,7 +115,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 		return describeDecodeError(err)
 	}
 	if dec.More() {
-		return errors.New("Request body must contain a single JSON object.")
+		return errors.New("request body must contain a single JSON object")
 	}
 	return nil
 }
@@ -201,18 +123,15 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 func requireJSONContentType(r *http.Request) error {
 	ct := r.Header.Get("Content-Type")
 	if ct == "" {
-		return errors.New("Content-Type must be application/json.")
+		return errors.New("Content-Type must be application/json")
 	}
 	mediaType, _, err := mime.ParseMediaType(ct)
 	if err != nil || mediaType != "application/json" {
-		return errors.New("Content-Type must be application/json.")
+		return errors.New("Content-Type must be application/json")
 	}
 	return nil
 }
 
-// describeDecodeError turns a decoder error into something safe to return.
-// Messages name the offending field but never echo the body, which holds the
-// submitted password.
 func describeDecodeError(err error) error {
 	var syntaxErr *json.SyntaxError
 	var typeErr *json.UnmarshalTypeError
@@ -220,19 +139,19 @@ func describeDecodeError(err error) error {
 
 	switch {
 	case errors.As(err, &syntaxErr):
-		return errors.New("Request body is not valid JSON.")
+		return errors.New("request body is not valid JSON")
 	case errors.As(err, &typeErr):
 		if typeErr.Field != "" {
-			return errors.New("Field " + typeErr.Field + " has the wrong type.")
+			return errors.New("field " + typeErr.Field + " has the wrong type")
 		}
-		return errors.New("Request body is not a JSON object.")
+		return errors.New("request body is not a JSON object")
 	case errors.As(err, &maxBytesErr):
-		return errors.New("Request body is too large.")
+		return errors.New("request body is too large")
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return errors.New("Request body is empty or truncated.")
+		return errors.New("request body is empty or truncated")
 	case strings.HasPrefix(err.Error(), "json: unknown field "):
-		return errors.New("Request body contains an unrecognised field.")
+		return errors.New("request body contains an unrecognised field")
 	default:
-		return errors.New("Request body could not be read.")
+		return errors.New("request body could not be read")
 	}
 }
