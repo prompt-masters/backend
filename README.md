@@ -2,10 +2,61 @@
 
 Backend API for Prompt Masters, built with Go.
 
-## Requirements
+## Project Structure
 
-- Docker & Docker Compose
-- Go 1.26.5+ (only to run or test outside Docker)
+```
+backend/
+├── cmd/server/main.go                     # Entry point, wires everything together
+│
+├── internal/
+│   ├── api/                               # HTTP / Transport layer
+│   │   ├── response.go                    # JSON response helpers
+│   │   └── middleware/                    # Auth, logging, CORS, etc.
+│   │
+│   ├── config/config.go                   # Env loading + validation
+│   │
+│   ├── db/
+│   │   ├── migrations/                    # Goose SQL migrations
+│   │   ├── queries/                       # SQLC query files
+│   │   ├── models.go                      # SQLC generated models
+│   │   ├── db.go                          # SQLC generated DB interface
+│   │   ├── querier.go                     # SQLC generated Querier interface
+│   │   └── *.sql.go                       # SQLC generated query code
+│   │
+│   ├── domain/                            # Pure business entities
+│   │   ├── user.go
+│   │   └── verification_token.go
+│   │
+│   ├── repository/                        # Data access interfaces
+│   │   ├── user.go
+│   │   ├── verification_token.go
+│   │   └── postgres/                      # Postgres implementations
+│   │       ├── helpers.go                 # UUID converters
+│   │       ├── user.go
+│   │       └── verification_token.go
+│   │
+│   ├── service/                           # Business logic / use cases
+│   │
+│   └── util/                              # Shared helpers
+│       └── password.go                    # Argon2id hash + verify
+│
+├── sqlc.yaml
+├── Makefile
+├── docker-compose.yaml
+├── Dockerfile
+├── DEV_GUIDE.md                           # Feature development workflow
+└── .env.example
+```
+
+## Tech Stack
+
+- **Go** 1.26.5+
+- **PostgreSQL** 16 (via Docker)
+- **[goose](https://github.com/pressly/goose)** — database migrations
+- **[sqlc](https://sqlc.dev)** — type-safe SQL query generation
+- **[pgx/v5](https://github.com/jackc/pgx)** — PostgreSQL driver
+- **argon2id** — password hashing
+- **google/uuid** — UUID generation
 
 ## Run with Docker
 
@@ -23,60 +74,50 @@ your machine, set `APP_PORT` and `POSTGRES_PORT` in `.env`.
 
 `make down` stops everything.
 
-The app image is built from `Dockerfile`: a static binary on distroless, so
-the runtime has no shell and nothing to pivot with. `.env` is excluded by
-`.dockerignore` and never enters the image — compose passes configuration in
-at runtime.
-
 ## Getting Started (without Docker)
 
-Prepare environment variables:
+**Requirements:** Go 1.26.5+, Docker, Docker Compose
 
 ```sh
+# 1. Setup environment
 cp .env.example .env
-```
 
-Start just the database:
+# 2. Start postgres
+make up
 
-```sh
-docker compose up -d postgres
+# 3. Run migrations
 make migrate-up
+
+# 4. Start server
+make run
 ```
 
-Run the server:
+## Make Commands
 
-```sh
-go mod tidy
-go run ./cmd/server
-```
+| Command | Description |
+|---|---|
+| `make up` | Start all containers |
+| `make down` | Stop all containers |
+| `make logs` | Tail container logs |
+| `make run` | Build and run server locally |
+| `make fmt` | Format Go code |
+| `make test` | Run tests |
+| `make migrate-up` | Apply all migrations |
+| `make migrate-down` | Rollback last migration |
+| `make migrate-create <name>` | Create a new migration file |
+| `make sqlc` | Regenerate sqlc code |
 
-## Database migrations
+## Development
 
-Migrations live in `migrations/` and are applied with the
-[golang-migrate](https://github.com/golang-migrate/migrate) CLI:
+See [DEV_GUIDE.md](DEV_GUIDE.md) for the full feature development workflow.
 
-```sh
-make migrate-up     # apply all pending migrations
-make migrate-down   # roll back the most recent one
-```
+**Quick flow:** domain → migration → sqlc queries → `make sqlc` → repository → service → api handler → wire in main.go
 
 ## Tests
 
 ```sh
 make test
 ```
-
-Repository tests need a real Postgres and are skipped unless
-`TEST_DATABASE_URL` is set, so the suite runs without a database. To
-include them, create the test database once and point the variable at it:
-
-```sh
-createdb prompters_test_db
-migrate -path ./migrations -database "$TEST_DATABASE_URL" up
-```
-
-These tests truncate the `users` table, so point `TEST_DATABASE_URL` at a
-database you do not mind losing.
 
 ## API
 
@@ -86,17 +127,6 @@ database you do not mind losing.
 { "username": "alice", "email": "alice@example.com", "password": "hunter2secret" }
 ```
 
-`201 Created`:
-
-```json
-{ "user_id": 1, "username": "alice", "email": "alice@example.com", "elo_rating": 1200 }
-```
-
-The account starts unverified and rated 1200. A verification link is emailed
-in the background, so a slow or unreachable SMTP server never delays or fails
-a registration that already succeeded — check the server log if mail is
-misconfigured.
-
 ### `GET /api/v1/auth/verify-email?token=...`
 
 Redeems the emailed link and marks the address verified. Tokens last 24 hours
@@ -104,7 +134,7 @@ and can be spent once.
 
 ### Errors
 
-Every failure has the same shape, with `fields` added for validation errors:
+Every failure has the same shape:
 
 ```json
 { "error_code": "VALIDATION_ERROR", "message": "The submitted values are not valid.",
@@ -113,27 +143,19 @@ Every failure has the same shape, with `fields` added for validation errors:
 
 | Status | `error_code` | Meaning |
 | --- | --- | --- |
-| 400 | `MALFORMED_REQUEST` | Unparseable body, unknown field, oversized body, or a non-JSON `Content-Type` |
+| 400 | `MALFORMED_REQUEST` | Unparseable body or unknown field |
 | 422 | `VALIDATION_ERROR` | Well-formed body, invalid values |
 | 409 | `EMAIL_ALREADY_EXISTS` | That email is registered |
-| 409 | `USERNAME_ALREADY_EXISTS` | That username is taken (compared case-insensitively) |
-| 400 | `INVALID_TOKEN` | Verification token missing, unknown, or already used |
+| 409 | `USERNAME_ALREADY_EXISTS` | That username is taken |
+| 400 | `INVALID_TOKEN` | Verification token missing or unknown |
 | 410 | `TOKEN_EXPIRED` | Verification token older than 24 hours |
-| 500 | `INTERNAL_ERROR` | Anything else; the cause is logged, never returned |
-
-### Validation rules
-
-- **username** — required, 3–32 characters, letters, digits and underscores
-- **email** — required, at most 254 characters, a bare address with a dotted domain
-- **password** — required, at least 8 characters, at most 72 bytes (bcrypt's limit)
+| 500 | `INTERNAL_ERROR` | Anything else; cause is logged, never returned |
 
 ## Email
 
 Set `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD` and
-`MAIL_FROM_EMAIL` to send through an SMTP server; on port 587 STARTTLS is
-negotiated automatically. For Gmail, `MAIL_PASSWORD` must be an
-[app password](https://support.google.com/accounts/answer/185833), not the
-account password.
+`MAIL_FROM_EMAIL` to send through SMTP; on port 587 STARTTLS is
+negotiated automatically.
 
 Leave `MAIL_HOST` empty and verification links are written to the server log
 instead of emailed, which is usually what you want locally.
