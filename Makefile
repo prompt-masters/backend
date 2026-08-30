@@ -10,6 +10,9 @@ logs:
 down:
 	docker compose down
 
+fmt:
+	go fmt ./...
+
 run:
 	go build -o myapp ./cmd/server && ./myapp
 
@@ -17,7 +20,13 @@ test:
 	go test ./...
 
 migrate-up:
-	migrate -path ./migrations -database "$(DATABASE_URL)" up
+	goose -dir internal/db/migrations postgres "$(DATABASE_URL)" up
 
 migrate-down:
-	migrate -path ./migrations -database "$(DATABASE_URL)" down 1
+	goose -dir internal/db/migrations postgres "$(DATABASE_URL)" down
+
+migrate-create:
+	goose -dir internal/db/migrations create $1 sql
+
+sqlc:
+	sqlc generate
