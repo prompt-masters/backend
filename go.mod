@@ -20,5 +20,3 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
-
-require github.com/golang-jwt/jwt/v5 v5.3.1
