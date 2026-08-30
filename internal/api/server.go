@@ -36,7 +36,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/verify-email", s.auth.VerifyEmail)
 
 	// Protected
-	mux.Handle("GET /api/v1/auth/me",
+	mux.Handle("GET /api/v1/users/me",
 		middleware.RequireAuth(s.jwtSecret, http.HandlerFunc(s.auth.Me)),
 	)
 

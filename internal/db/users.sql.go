@@ -14,7 +14,7 @@ import (
 const CreateUser = `-- name: CreateUser :one
 INSERT INTO users (id, username, email, password)
 VALUES ($1, $2, $3, $4)
-RETURNING id, username, email, password, email_verified, created_at, updated_at
+RETURNING id, username, email, password, email_verified, created_at, updated_at, avatar_url, elo_rating
 `
 
 type CreateUserParams struct {
@@ -40,12 +40,14 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (*User, 
 		&i.EmailVerified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AvatarUrl,
+		&i.EloRating,
 	)
 	return &i, err
 }
 
 const GetUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, username, email, password, email_verified, created_at, updated_at FROM users WHERE email = $1
+SELECT id, username, email, password, email_verified, created_at, updated_at, avatar_url, elo_rating FROM users WHERE email = $1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (*User, error) {
@@ -59,12 +61,14 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (*User, erro
 		&i.EmailVerified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AvatarUrl,
+		&i.EloRating,
 	)
 	return &i, err
 }
 
 const GetUserByID = `-- name: GetUserByID :one
-SELECT id, username, email, password, email_verified, created_at, updated_at FROM users WHERE id = $1
+SELECT id, username, email, password, email_verified, created_at, updated_at, avatar_url, elo_rating FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error) {
@@ -78,12 +82,14 @@ func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error
 		&i.EmailVerified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AvatarUrl,
+		&i.EloRating,
 	)
 	return &i, err
 }
 
 const GetUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, username, email, password, email_verified, created_at, updated_at FROM users WHERE username = $1
+SELECT id, username, email, password, email_verified, created_at, updated_at, avatar_url, elo_rating FROM users WHERE username = $1
 `
 
 func (q *Queries) GetUserByUsername(ctx context.Context, username string) (*User, error) {
@@ -97,6 +103,8 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (*User
 		&i.EmailVerified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AvatarUrl,
+		&i.EloRating,
 	)
 	return &i, err
 }
