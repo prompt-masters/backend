@@ -107,6 +107,13 @@ make run
 | `make migrate-create <name>` | Create a new migration file |
 | `make sqlc` | Regenerate sqlc code |
 
+## Code Quality Checks
+
+Before committing or pushing backend changes, run:
+
+```sh
+make check
+
 ## Development
 
 See [DEV_GUIDE.md](DEV_GUIDE.md) for the full feature development workflow.
