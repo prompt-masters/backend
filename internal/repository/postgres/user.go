@@ -65,6 +65,14 @@ func (r *UserRepository) UpdateEmail(ctx context.Context, id uuid.UUID, email st
 	})
 }
 
+func (r *UserRepository) UpdateUsername(ctx context.Context, id uuid.UUID, username string) error {
+	err := r.queries.UpdateUserUsername(ctx, db.UpdateUserUsernameParams{
+		ID:       pgUUID(id),
+		Username: username,
+	})
+	return translateUpdateError(err)
+}
+
 func (r *UserRepository) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
 	return r.queries.SetEmailVerified(ctx, pgUUID(id))
 }
@@ -78,6 +86,14 @@ func translateCreateError(err error) error {
 		case strings.Contains(pgErr.ConstraintName, "username"):
 			return domain.ErrUsernameTaken
 		}
+	}
+	return err
+}
+
+func translateUpdateError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && strings.Contains(pgErr.ConstraintName, "username") {
+		return domain.ErrUsernameTaken
 	}
 	return err
 }
