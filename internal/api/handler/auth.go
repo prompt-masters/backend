@@ -38,7 +38,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.WriteJSON(w, http.StatusCreated, response.Envelope{
-		"data": reg.User,
+		"data": dto.UserFromDomain(reg.User),
 	})
 }
 
@@ -59,7 +59,33 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.WriteJSON(w, http.StatusOK, response.Envelope{
-		"data": dto.LoginResponse{User: result.User, Token: result.Token},
+		"data": dto.LoginResponse{
+			User:         dto.UserFromDomain(result.User),
+			AccessToken:  result.AccessToken,
+			RefreshToken: result.RefreshToken,
+		},
+	})
+}
+
+func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
+	var req dto.RefreshRequest
+	if err := response.DecodeJSON(w, r, &req); err != nil {
+		response.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	result, err := h.svc.Refresh(r.Context(), req.RefreshToken)
+	if err != nil {
+		response.WriteDomainError(w, h.logger, err)
+		return
+	}
+
+	response.WriteJSON(w, http.StatusOK, response.Envelope{
+		"data": dto.LoginResponse{
+			User:         dto.UserFromDomain(result.User),
+			AccessToken:  result.AccessToken,
+			RefreshToken: result.RefreshToken,
+		},
 	})
 }
 
@@ -76,7 +102,48 @@ func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response.WriteJSON(w, http.StatusOK, response.Envelope{"data": user})
+	response.WriteJSON(w, http.StatusOK, response.Envelope{"data": dto.UserFromDomain(user)})
+}
+
+func (h *AuthHandler) Profile(w http.ResponseWriter, r *http.Request) {
+	h.Me(w, r)
+}
+
+func (h *AuthHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		response.WriteError(w, http.StatusUnauthorized, "A valid access token is required.")
+		return
+	}
+
+	var req dto.UpdateProfileRequest
+	if err := response.DecodeJSON(w, r, &req); err != nil {
+		response.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	user, err := h.svc.UpdateProfile(r.Context(), userID, service.UpdateProfileInput{
+		Username: req.Username,
+	})
+	if err != nil {
+		response.WriteDomainError(w, h.logger, err)
+		return
+	}
+
+	response.WriteJSON(w, http.StatusOK, response.Envelope{"data": dto.UserFromDomain(user)})
+}
+
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	var req dto.RefreshRequest
+	if err := response.DecodeJSON(w, r, &req); err != nil {
+		response.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.svc.Logout(r.Context(), req.RefreshToken); err != nil {
+		response.WriteDomainError(w, h.logger, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
@@ -88,5 +155,5 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response.WriteJSON(w, http.StatusOK, response.Envelope{"data": user})
+	response.WriteJSON(w, http.StatusOK, response.Envelope{"data": dto.UserFromDomain(user)})
 }

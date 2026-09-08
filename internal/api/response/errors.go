@@ -14,7 +14,7 @@ import (
 func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 	var vErr *service.ValidationError
 	if errors.As(err, &vErr) {
-		WriteJSON(w, http.StatusUnprocessableEntity, Envelope{
+		WriteJSON(w, http.StatusBadRequest, Envelope{
 			"error":  "Validation failed",
 			"fields": vErr.Fields,
 		})
@@ -28,8 +28,12 @@ func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 		WriteError(w, http.StatusConflict, "That username is already taken.")
 	case errors.Is(err, domain.ErrInvalidCredentials):
 		WriteError(w, http.StatusUnauthorized, "Incorrect email or password.")
+	case errors.Is(err, domain.ErrInvalidRefreshToken):
+		WriteError(w, http.StatusUnauthorized, "A valid refresh token is required.")
 	case errors.Is(err, domain.ErrEmailNotVerified):
 		WriteError(w, http.StatusForbidden, "Please verify your email address before signing in.")
+	case errors.Is(err, domain.ErrNotFound):
+		WriteError(w, http.StatusNotFound, "The requested resource was not found.")
 	case errors.Is(err, domain.ErrInvalidVerificationToken):
 		WriteError(w, http.StatusBadRequest, "This verification link is not valid or has already been used.")
 	case errors.Is(err, domain.ErrVerificationTokenExpired):

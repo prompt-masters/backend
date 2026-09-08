@@ -38,9 +38,10 @@ func main() {
 	queries := db.New(pool)
 	userRepo := postgres.NewUserRepository(queries)
 	tokenRepo := postgres.NewVerificationTokenRepository(queries)
+	refreshTokenRepo := postgres.NewRefreshTokenRepository(queries)
 	sender := mail.NewSenderFromConfig(cfg.Mail, os.Stderr)
 
-	authService := service.NewAuthService(userRepo, tokenRepo, sender, *cfg)
+	authService := service.NewAuthService(userRepo, tokenRepo, refreshTokenRepo, sender, *cfg)
 
 	server := api.NewServer(authService, logger, cfg.JWTSecret)
 

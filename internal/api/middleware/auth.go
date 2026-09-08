@@ -24,7 +24,6 @@ func RequireAuth(secret string, next http.Handler) http.Handler {
 			response.WriteError(w, http.StatusUnauthorized, "A valid access token is required.")
 			return
 		}
-
 		ctx := context.WithValue(r.Context(), userIDKey, userID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
