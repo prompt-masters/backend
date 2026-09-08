@@ -14,7 +14,7 @@ import (
 const CreateUser = `-- name: CreateUser :one
 INSERT INTO users (id, username, email, password)
 VALUES ($1, $2, $3, $4)
-RETURNING id, username, email, password, email_verified, created_at, updated_at, avatar_url, elo_rating
+RETURNING id, username, email, password, email_verified, created_at, updated_at
 `
 
 type CreateUserParams struct {
@@ -40,14 +40,12 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (*User, 
 		&i.EmailVerified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.AvatarUrl,
-		&i.EloRating,
 	)
 	return &i, err
 }
 
 const GetUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, username, email, password, email_verified, created_at, updated_at, avatar_url, elo_rating FROM users WHERE email = $1
+SELECT id, username, email, password, email_verified, created_at, updated_at FROM users WHERE email = $1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (*User, error) {
@@ -61,14 +59,12 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (*User, erro
 		&i.EmailVerified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.AvatarUrl,
-		&i.EloRating,
 	)
 	return &i, err
 }
 
 const GetUserByID = `-- name: GetUserByID :one
-SELECT id, username, email, password, email_verified, created_at, updated_at, avatar_url, elo_rating FROM users WHERE id = $1
+SELECT id, username, email, password, email_verified, created_at, updated_at FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error) {
@@ -82,14 +78,12 @@ func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error
 		&i.EmailVerified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.AvatarUrl,
-		&i.EloRating,
 	)
 	return &i, err
 }
 
 const GetUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, username, email, password, email_verified, created_at, updated_at, avatar_url, elo_rating FROM users WHERE username = $1
+SELECT id, username, email, password, email_verified, created_at, updated_at FROM users WHERE username = $1
 `
 
 func (q *Queries) GetUserByUsername(ctx context.Context, username string) (*User, error) {
@@ -103,8 +97,6 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (*User
 		&i.EmailVerified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.AvatarUrl,
-		&i.EloRating,
 	)
 	return &i, err
 }
@@ -129,5 +121,19 @@ type UpdateUserEmailParams struct {
 
 func (q *Queries) UpdateUserEmail(ctx context.Context, arg UpdateUserEmailParams) error {
 	_, err := q.db.Exec(ctx, UpdateUserEmail, arg.ID, arg.Email)
+	return err
+}
+
+const UpdateUserUsername = `-- name: UpdateUserUsername :exec
+UPDATE users SET username = $2, updated_at = NOW() WHERE id = $1
+`
+
+type UpdateUserUsernameParams struct {
+	ID       pgtype.UUID
+	Username string
+}
+
+func (q *Queries) UpdateUserUsername(ctx context.Context, arg UpdateUserUsernameParams) error {
+	_, err := q.db.Exec(ctx, UpdateUserUsername, arg.ID, arg.Username)
 	return err
 }

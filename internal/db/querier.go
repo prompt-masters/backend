@@ -11,16 +11,21 @@ import (
 )
 
 type Querier interface {
+	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) error
 	CreateUser(ctx context.Context, arg CreateUserParams) (*User, error)
 	CreateVerificationToken(ctx context.Context, arg CreateVerificationTokenParams) (*VerificationToken, error)
 	DeleteExpiredTokens(ctx context.Context) error
 	DeleteVerificationToken(ctx context.Context, token string) error
+	GetActiveRefreshTokenUserID(ctx context.Context, tokenHash string) (pgtype.UUID, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	GetVerificationToken(ctx context.Context, token string) (*VerificationToken, error)
+	RevokeRefreshToken(ctx context.Context, tokenHash string) error
+	RotateRefreshToken(ctx context.Context, arg RotateRefreshTokenParams) (pgtype.UUID, error)
 	SetEmailVerified(ctx context.Context, id pgtype.UUID) error
 	UpdateUserEmail(ctx context.Context, arg UpdateUserEmailParams) error
+	UpdateUserUsername(ctx context.Context, arg UpdateUserUsernameParams) error
 }
 
 var _ Querier = (*Queries)(nil)

@@ -10,19 +10,21 @@ import (
 )
 
 const (
-	defaultPort     = "8080"
-	defaultJWTTTL   = 24 * time.Hour
-	defaultMailPort = 587
+	defaultPort            = "8080"
+	defaultJWTTTL          = 15 * time.Minute
+	defaultRefreshTokenTTL = 30 * 24 * time.Hour
+	defaultMailPort        = 587
 )
 
 type Config struct {
-	Host        string
-	Port        string
-	DatabaseURL string
-	JWTSecret   string
-	JWTTTL      time.Duration
-	AppBaseURL  string
-	Mail        mail.Config
+	Host            string
+	Port            string
+	DatabaseURL     string
+	JWTSecret       string
+	JWTTTL          time.Duration
+	RefreshTokenTTL time.Duration
+	AppBaseURL      string
+	Mail            mail.Config
 }
 
 func Load() (*Config, error) {
@@ -55,6 +57,13 @@ func Load() (*Config, error) {
 		cfg.JWTTTL = defaultJWTTTL
 	} else {
 		cfg.JWTTTL = jwtTTL
+	}
+
+	refreshTTL, err := time.ParseDuration(os.Getenv("REFRESH_TOKEN_TTL"))
+	if err != nil {
+		cfg.RefreshTokenTTL = defaultRefreshTokenTTL
+	} else {
+		cfg.RefreshTokenTTL = refreshTTL
 	}
 
 	if cfg.DatabaseURL == "" {

@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/prompt-masters/backend/internal/db"
 	"github.com/prompt-masters/backend/internal/domain"
 )
@@ -66,6 +65,14 @@ func (r *UserRepository) UpdateEmail(ctx context.Context, id uuid.UUID, email st
 	})
 }
 
+func (r *UserRepository) UpdateUsername(ctx context.Context, id uuid.UUID, username string) error {
+	err := r.queries.UpdateUserUsername(ctx, db.UpdateUserUsernameParams{
+		ID:       pgUUID(id),
+		Username: username,
+	})
+	return translateUpdateError(err)
+}
+
 func (r *UserRepository) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
 	return r.queries.SetEmailVerified(ctx, pgUUID(id))
 }
@@ -83,6 +90,14 @@ func translateCreateError(err error) error {
 	return err
 }
 
+func translateUpdateError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && strings.Contains(pgErr.ConstraintName, "username") {
+		return domain.ErrUsernameTaken
+	}
+	return err
+}
+
 func translateGetError(err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ErrNotFound
@@ -96,18 +111,8 @@ func toDomainUser(u *db.User) *domain.User {
 		Username:      u.Username,
 		Email:         u.Email,
 		Password:      u.Password,
-		AvatarURL:     textPtr(u.AvatarUrl),
-		EloRating:     int(u.EloRating),
 		EmailVerified: u.EmailVerified,
 		CreatedAt:     u.CreatedAt.Time,
 		UpdatedAt:     u.UpdatedAt.Time,
 	}
-}
-
-func textPtr(value pgtype.Text) *string {
-	if !value.Valid {
-		return nil
-	}
-
-	return &value.String
 }

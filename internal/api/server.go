@@ -33,12 +33,17 @@ func (s *Server) Routes() http.Handler {
 	// Public
 	mux.HandleFunc("POST /api/v1/auth/register", s.auth.Register)
 	mux.HandleFunc("POST /api/v1/auth/login", s.auth.Login)
+	mux.HandleFunc("POST /api/v1/auth/refresh", s.auth.Refresh)
+	mux.HandleFunc("POST /api/v1/auth/logout", s.auth.Logout)
 	mux.HandleFunc("GET /api/v1/auth/verify-email", s.auth.VerifyEmail)
 
 	// Protected
-	mux.Handle("GET /api/v1/users/me",
-		middleware.RequireAuth(s.jwtSecret, http.HandlerFunc(s.auth.Me)),
-	)
+	protected := func(method, path string, handler http.HandlerFunc) {
+		mux.Handle(method+" "+path, middleware.RequireAuth(s.jwtSecret, handler))
+	}
+	protected("GET", "/api/v1/auth/me", s.auth.Me)
+	protected("GET", "/api/v1/auth/profile", s.auth.Profile)
+	protected("PUT", "/api/v1/auth/profile", s.auth.UpdateProfile)
 
 	return mux
 }
