@@ -83,6 +83,13 @@ func validateUsername(username string) string {
 	return ""
 }
 
+func validateUsernameInput(username string) error {
+	if msg := validateUsername(username); msg != "" {
+		return &ValidationError{Fields: map[string]string{"username": msg}}
+	}
+	return nil
+}
+
 func validateEmail(email string) string {
 	if strings.TrimSpace(email) == "" {
 		return "is required"

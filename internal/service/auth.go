@@ -37,24 +37,27 @@ type LoginInput struct {
 }
 
 type LoginResult struct {
-	User  *domain.User
-	Token string
+	User         *domain.User
+	AccessToken  string
+	RefreshToken string
 }
 
 type AuthService struct {
-	users  repository.UserRepository
-	tokens repository.VerificationTokenRepository
-	sender mail.Sender
-	cfg    config.Config
+	users   repository.UserRepository
+	tokens  repository.VerificationTokenRepository
+	refresh repository.RefreshTokenRepository
+	sender  mail.Sender
+	cfg     config.Config
 }
 
 func NewAuthService(
 	users repository.UserRepository,
 	tokens repository.VerificationTokenRepository,
+	refresh repository.RefreshTokenRepository,
 	sender mail.Sender,
 	cfg config.Config,
 ) *AuthService {
-	return &AuthService{users: users, tokens: tokens, sender: sender, cfg: cfg}
+	return &AuthService{users: users, tokens: tokens, refresh: refresh, sender: sender, cfg: cfg}
 }
 
 func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*Registration, error) {
@@ -125,7 +128,15 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginResult, e
 		return nil, fmt.Errorf("generating access token: %w", err)
 	}
 
-	return &LoginResult{User: user, Token: token}, nil
+	refreshToken, err := util.GenerateToken(tokenBytes)
+	if err != nil {
+		return nil, fmt.Errorf("generating refresh token: %w", err)
+	}
+	if err := s.refresh.Create(ctx, util.HashToken(refreshToken), user.ID, time.Now().Add(s.cfg.RefreshTokenTTL)); err != nil {
+		return nil, fmt.Errorf("storing refresh token: %w", err)
+	}
+
+	return &LoginResult{User: user, AccessToken: token, RefreshToken: refreshToken}, nil
 }
 
 func (s *AuthService) VerifyEmail(ctx context.Context, rawToken string) (*domain.User, error) {
@@ -162,4 +173,59 @@ func (s *AuthService) Me(ctx context.Context, userID uuid.UUID) (*domain.User, e
 		return nil, err
 	}
 	return user, nil
+}
+
+type UpdateProfileInput struct {
+	Username string
+}
+
+func (s *AuthService) UpdateProfile(ctx context.Context, userID uuid.UUID, in UpdateProfileInput) (*domain.User, error) {
+	in.Username = strings.TrimSpace(in.Username)
+	if err := validateUsernameInput(in.Username); err != nil {
+		return nil, err
+	}
+
+	if err := s.users.UpdateUsername(ctx, userID, in.Username); err != nil {
+		return nil, err
+	}
+	return s.users.GetByID(ctx, userID)
+}
+
+func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (*LoginResult, error) {
+	if rawRefreshToken == "" {
+		return nil, domain.ErrInvalidRefreshToken
+	}
+	hash := util.HashToken(rawRefreshToken)
+	userID, err := s.refresh.GetActiveUserID(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+	user, err := s.users.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	accessToken, err := util.GenerateJWT(s.cfg.JWTSecret, user.ID, s.cfg.JWTTTL)
+	if err != nil {
+		return nil, fmt.Errorf("generating access token: %w", err)
+	}
+	newRefreshToken, err := util.GenerateToken(tokenBytes)
+	if err != nil {
+		return nil, fmt.Errorf("generating refresh token: %w", err)
+	}
+	rotatedUserID, err := s.refresh.Rotate(ctx, hash, util.HashToken(newRefreshToken), time.Now().Add(s.cfg.RefreshTokenTTL))
+	if err != nil {
+		return nil, err
+	}
+	if rotatedUserID != userID {
+		return nil, domain.ErrInvalidRefreshToken
+	}
+
+	return &LoginResult{User: user, AccessToken: accessToken, RefreshToken: newRefreshToken}, nil
+}
+
+func (s *AuthService) Logout(ctx context.Context, rawRefreshToken string) error {
+	if rawRefreshToken == "" {
+		return nil
+	}
+	return s.refresh.Revoke(ctx, util.HashToken(rawRefreshToken))
 }

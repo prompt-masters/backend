@@ -11,6 +11,11 @@ import (
 
 var ErrInvalidToken = errors.New("invalid token")
 
+type AccessTokenClaims struct {
+	UserID    uuid.UUID
+	ExpiresAt time.Time
+}
+
 func GenerateJWT(secret string, userID uuid.UUID, ttl time.Duration) (string, error) {
 	now := time.Now()
 	claims := jwt.RegisteredClaims{
@@ -28,6 +33,14 @@ func GenerateJWT(secret string, userID uuid.UUID, ttl time.Duration) (string, er
 }
 
 func ParseJWT(secret, tokenString string) (uuid.UUID, error) {
+	claims, err := ParseAccessToken(secret, tokenString)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return claims.UserID, nil
+}
+
+func ParseAccessToken(secret, tokenString string) (AccessTokenClaims, error) {
 	claims := &jwt.RegisteredClaims{}
 	token, err := jwt.ParseWithClaims(
 		tokenString,
@@ -42,12 +55,15 @@ func ParseJWT(secret, tokenString string) (uuid.UUID, error) {
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil || !token.Valid {
-		return uuid.Nil, ErrInvalidToken
+		return AccessTokenClaims{}, ErrInvalidToken
 	}
 
 	userID, err := uuid.Parse(claims.Subject)
-	if err != nil {
-		return uuid.Nil, ErrInvalidToken
+	if err != nil || claims.ExpiresAt == nil {
+		return AccessTokenClaims{}, ErrInvalidToken
 	}
-	return userID, nil
+	return AccessTokenClaims{
+		UserID:    userID,
+		ExpiresAt: claims.ExpiresAt.Time,
+	}, nil
 }
