@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/prompt-masters/backend/internal/db"
 	"github.com/prompt-masters/backend/internal/domain"
 )
@@ -95,8 +96,18 @@ func toDomainUser(u *db.User) *domain.User {
 		Username:      u.Username,
 		Email:         u.Email,
 		Password:      u.Password,
+		AvatarURL:     textPtr(u.AvatarUrl),
+		EloRating:     int(u.EloRating),
 		EmailVerified: u.EmailVerified,
 		CreatedAt:     u.CreatedAt.Time,
 		UpdatedAt:     u.UpdatedAt.Time,
 	}
+}
+
+func textPtr(value pgtype.Text) *string {
+	if !value.Valid {
+		return nil
+	}
+
+	return &value.String
 }

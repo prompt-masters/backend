@@ -87,6 +87,7 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		response.WriteDomainError(w, h.logger, err)
 		return
 	}
-
-	response.WriteJSON(w, http.StatusOK, response.Envelope{"data": user})
+	response.WriteJSON(w, http.StatusOK, response.Envelope{
+		"data": dto.NewCurrentUserResponse(user),
+	})
 }

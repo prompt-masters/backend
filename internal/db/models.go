@@ -16,6 +16,8 @@ type User struct {
 	EmailVerified bool
 	CreatedAt     pgtype.Timestamptz
 	UpdatedAt     pgtype.Timestamptz
+	AvatarUrl     pgtype.Text
+	EloRating     int32
 }
 
 type VerificationToken struct {
