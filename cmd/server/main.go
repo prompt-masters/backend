@@ -40,11 +40,7 @@ func main() {
 	tokenRepo := postgres.NewVerificationTokenRepository(queries)
 	sender := mail.NewSenderFromConfig(cfg.Mail, os.Stderr)
 
-	authService := service.NewAuthService(userRepo, tokenRepo, sender, service.Config{
-		JWTSecret:  cfg.JWTSecret,
-		JWTTTL:     cfg.JWTTTL,
-		AppBaseURL: cfg.AppBaseURL,
-	})
+	authService := service.NewAuthService(userRepo, tokenRepo, sender, *cfg)
 
 	server := api.NewServer(authService, logger, cfg.JWTSecret)
 
