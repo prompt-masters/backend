@@ -71,7 +71,7 @@ func newTestAPI(t *testing.T) *testAPI {
 	challengeService := service.NewChallengeService(challengeRepo)
 	gameService := service.NewGameService(postgres.NewTransactor(pool), service.MathRandom{})
 
-	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, logger, jwtSecret).Routes())
+	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, nil, logger, jwtSecret).Routes())
 	t.Cleanup(server.Close)
 	return &testAPI{t: t, server: server, users: userRepo}
 }

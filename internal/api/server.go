@@ -13,6 +13,7 @@ type Server struct {
 	auth       *handler.AuthHandler
 	challenges *handler.ChallengeHandler
 	games      *handler.GameHandler
+	health     *handler.HealthHandler
 	logger     *log.Logger
 	jwtSecret  string
 }
@@ -21,6 +22,7 @@ func NewServer(
 	authService *service.AuthService,
 	challengeService *service.ChallengeService,
 	gameService *service.GameService,
+	healthChecks []handler.HealthCheck,
 	logger *log.Logger,
 	jwtSecret string,
 ) *Server {
@@ -28,6 +30,7 @@ func NewServer(
 		auth:       handler.NewAuthHandler(authService, logger),
 		challenges: handler.NewChallengeHandler(challengeService, logger),
 		games:      handler.NewGameHandler(gameService, logger),
+		health:     handler.NewHealthHandler(healthChecks, logger),
 		logger:     logger,
 		jwtSecret:  jwtSecret,
 	}
@@ -37,6 +40,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	// Public
+	mux.HandleFunc("GET /health", s.health.Health)
 	mux.HandleFunc("POST /api/v1/auth/register", s.auth.Register)
 	mux.HandleFunc("POST /api/v1/auth/login", s.auth.Login)
 	mux.HandleFunc("POST /api/v1/auth/refresh", s.auth.Refresh)
