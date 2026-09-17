@@ -12,6 +12,7 @@ import (
 type Server struct {
 	auth       *handler.AuthHandler
 	challenges *handler.ChallengeHandler
+	games      *handler.GameHandler
 	logger     *log.Logger
 	jwtSecret  string
 }
@@ -19,12 +20,14 @@ type Server struct {
 func NewServer(
 	authService *service.AuthService,
 	challengeService *service.ChallengeService,
+	gameService *service.GameService,
 	logger *log.Logger,
 	jwtSecret string,
 ) *Server {
 	return &Server{
 		auth:       handler.NewAuthHandler(authService, logger),
 		challenges: handler.NewChallengeHandler(challengeService, logger),
+		games:      handler.NewGameHandler(gameService, logger),
 		logger:     logger,
 		jwtSecret:  jwtSecret,
 	}
@@ -50,6 +53,14 @@ func (s *Server) Routes() http.Handler {
 	protected("GET", "/api/v1/auth/me", s.auth.Me)
 	protected("GET", "/api/v1/auth/profile", s.auth.Profile)
 	protected("PUT", "/api/v1/auth/profile", s.auth.UpdateProfile)
+	protected("GET", "/api/v1/games", s.games.List)
+	protected("POST", "/api/v1/games", s.games.Create)
+	protected("GET", "/api/v1/games/{id}", s.games.Get)
+	protected("PUT", "/api/v1/games/{id}/settings", s.games.UpdateSettings)
+	protected("POST", "/api/v1/games/{id}/join", s.games.Join)
+	protected("POST", "/api/v1/games/{id}/leave", s.games.Leave)
+	protected("POST", "/api/v1/games/{id}/start", s.games.Start)
+	protected("DELETE", "/api/v1/games/{id}", s.games.Cancel)
 
 	return mux
 }

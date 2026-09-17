@@ -2,6 +2,7 @@ package response
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -33,7 +34,21 @@ func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 	case errors.Is(err, domain.ErrEmailNotVerified):
 		WriteError(w, http.StatusForbidden, "Please verify your email address before signing in.")
 	case errors.Is(err, domain.ErrNoEligibleChallenge):
-		WriteError(w, http.StatusNotFound, "No challenge matches the game configuration.")
+		WriteError(w, http.StatusConflict, "No challenge matches the game's category and difficulty.")
+	case errors.Is(err, domain.ErrNotGameHost):
+		WriteError(w, http.StatusForbidden, "Only the host can do this.")
+	case errors.Is(err, domain.ErrGameNotWaiting):
+		WriteError(w, http.StatusConflict, "This game has already started or ended.")
+	case errors.Is(err, domain.ErrGameNotCancellable):
+		WriteError(w, http.StatusConflict, "This game has already ended.")
+	case errors.Is(err, domain.ErrGameFull):
+		WriteError(w, http.StatusConflict, "This game is full.")
+	case errors.Is(err, domain.ErrAlreadyJoined):
+		WriteError(w, http.StatusConflict, "You have already joined this game.")
+	case errors.Is(err, domain.ErrNotInGame):
+		WriteError(w, http.StatusConflict, "You are not a player in this game.")
+	case errors.Is(err, domain.ErrNotEnoughPlayers):
+		WriteError(w, http.StatusConflict, fmt.Sprintf("At least %d players are needed to start.", domain.MinPlayers))
 	case errors.Is(err, domain.ErrNotFound):
 		WriteError(w, http.StatusNotFound, "The requested resource was not found.")
 	case errors.Is(err, domain.ErrInvalidVerificationToken):
