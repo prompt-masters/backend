@@ -10,20 +10,23 @@ import (
 )
 
 type Server struct {
-	auth      *handler.AuthHandler
-	logger    *log.Logger
-	jwtSecret string
+	auth       *handler.AuthHandler
+	challenges *handler.ChallengeHandler
+	logger     *log.Logger
+	jwtSecret  string
 }
 
 func NewServer(
 	authService *service.AuthService,
+	challengeService *service.ChallengeService,
 	logger *log.Logger,
 	jwtSecret string,
 ) *Server {
 	return &Server{
-		auth:      handler.NewAuthHandler(authService, logger),
-		logger:    logger,
-		jwtSecret: jwtSecret,
+		auth:       handler.NewAuthHandler(authService, logger),
+		challenges: handler.NewChallengeHandler(challengeService, logger),
+		logger:     logger,
+		jwtSecret:  jwtSecret,
 	}
 }
 
@@ -36,6 +39,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/refresh", s.auth.Refresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.auth.Logout)
 	mux.HandleFunc("GET /api/v1/auth/verify-email", s.auth.VerifyEmail)
+	mux.HandleFunc("GET /api/v1/challenges", s.challenges.List)
+	mux.HandleFunc("GET /api/v1/challenges/categories", s.challenges.Categories)
+	mux.HandleFunc("GET /api/v1/challenges/{id}", s.challenges.Get)
 
 	// Protected
 	protected := func(method, path string, handler http.HandlerFunc) {

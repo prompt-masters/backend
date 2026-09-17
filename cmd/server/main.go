@@ -39,11 +39,13 @@ func main() {
 	userRepo := postgres.NewUserRepository(queries)
 	tokenRepo := postgres.NewVerificationTokenRepository(queries)
 	refreshTokenRepo := postgres.NewRefreshTokenRepository(queries)
+	challengeRepo := postgres.NewChallengeRepository(queries)
 	sender := mail.NewSenderFromConfig(cfg.Mail, os.Stderr)
 
 	authService := service.NewAuthService(userRepo, tokenRepo, refreshTokenRepo, sender, *cfg)
+	challengeService := service.NewChallengeService(challengeRepo)
 
-	server := api.NewServer(authService, logger, cfg.JWTSecret)
+	server := api.NewServer(authService, challengeService, logger, cfg.JWTSecret)
 
 	s := http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),
