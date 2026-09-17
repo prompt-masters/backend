@@ -88,7 +88,10 @@ make up
 # 3. Run migrations
 make migrate-up
 
-# 4. Start server
+# 4. Load dev challenges (optional, safe to re-run)
+make seed
+
+# 5. Start server
 make run
 ```
 
@@ -104,6 +107,7 @@ make run
 | `make test` | Run tests |
 | `make migrate-up` | Apply all migrations |
 | `make migrate-down` | Rollback last migration |
+| `make seed` | Load dev challenge data (idempotent, safe to re-run) |
 | `make migrate-create <name>` | Create a new migration file |
 | `make sqlc` | Regenerate sqlc code |
 
@@ -119,6 +123,10 @@ See [DEV_GUIDE.md](DEV_GUIDE.md) for the full feature development workflow.
 make test
 ```
 
+Repository tests run against `TEST_DATABASE_URL`. Each test migrates a
+throwaway schema and drops it afterwards, so existing tables are untouched.
+They are skipped when `TEST_DATABASE_URL` is unset.
+
 ## API
 
 ### `POST /api/v1/auth/register`
@@ -131,6 +139,24 @@ make test
 
 Redeems the emailed link and marks the address verified. Tokens last 24 hours
 and can be spent once.
+
+### `GET /api/v1/challenges`
+
+Lists challenges. Optional filters, usable alone or together:
+
+- `category`: one of `creative_writing`, `coding`, `data_extraction`, `summarization`, `reasoning`
+- `difficulty`: one of `easy`, `medium`, `hard`
+
+Unknown values return 400 with field details.
+
+### `GET /api/v1/challenges/{id}`
+
+Returns one challenge with its `constraints` and `judge_criteria`. Unknown or
+malformed IDs return 404.
+
+### `GET /api/v1/challenges/categories`
+
+Returns the list of available categories.
 
 ### Errors
 

@@ -25,6 +25,9 @@ migrate-up:
 migrate-down:
 	goose -dir internal/db/migrations postgres "$(DATABASE_URL)" down
 
+seed:
+	go run ./cmd/seed
+
 migrate-create:
 	goose -dir internal/db/migrations create "$(NAME)" sql
 
