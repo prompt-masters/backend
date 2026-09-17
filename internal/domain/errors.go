@@ -20,4 +20,7 @@ var (
 	ErrAlreadyJoined            = errors.New("already joined this game")
 	ErrNotInGame                = errors.New("not a player in this game")
 	ErrNotEnoughPlayers         = errors.New("not enough players to start")
+	ErrNotGamePlayer            = errors.New("only players of this game can do this")
+	ErrStateNotFound            = errors.New("live game state not found")
+	ErrStateUnavailable         = errors.New("live game state is temporarily unavailable")
 )
