@@ -36,15 +36,19 @@ type GameSettingsInput struct {
 //
 // Game references accept either the game's UUID or the six-digit room code of
 // an active game.
+//
+// After a change commits, the resulting game is mirrored into live state
+// through the LiveStateSyncer, best effort.
 type GameService struct {
 	tx     repository.Transactor
 	random Random
+	live   LiveStateSyncer
 }
 
 // NewGameService uses random for room codes and for the ChallengeFactory that
 // checks a game can start.
-func NewGameService(tx repository.Transactor, random Random) *GameService {
-	return &GameService{tx: tx, random: random}
+func NewGameService(tx repository.Transactor, random Random, live LiveStateSyncer) *GameService {
+	return &GameService{tx: tx, random: random, live: live}
 }
 
 // List returns up to gameListLimit games in the given status, newest first.
@@ -93,7 +97,11 @@ func (s *GameService) Create(ctx context.Context, hostID uuid.UUID, in GameSetti
 		game, err = repo.GetByID(ctx, created.ID)
 		return err
 	})
-	return game, err
+	if err != nil {
+		return nil, err
+	}
+	s.live.SyncGame(ctx, game)
+	return game, nil
 }
 
 func (s *GameService) Get(ctx context.Context, ref string) (*domain.Game, error) {
@@ -234,6 +242,7 @@ func (s *GameService) checkReadyToStart(ctx context.Context, challenges reposito
 
 // mutate locks the referenced game, applies fn and returns the game as it is
 // afterwards, all in one transaction. The game is not reloaded when fn fails.
+// After the commit, the game is mirrored into live state.
 func (s *GameService) mutate(
 	ctx context.Context,
 	ref string,
@@ -259,6 +268,7 @@ func (s *GameService) mutate(
 	if err != nil {
 		return nil, err
 	}
+	s.live.SyncGame(ctx, game)
 	return game, nil
 }
 

@@ -207,9 +207,28 @@ var validSettings = domain.GameSettings{
 	MaxPlayers:          4,
 }
 
+// recordingSyncer records the games mirrored into live state.
+type recordingSyncer struct {
+	mu    sync.Mutex
+	games []*domain.Game
+}
+
+func (r *recordingSyncer) SyncGame(_ context.Context, g *domain.Game) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.games = append(r.games, cloneGame(g))
+}
+
+func (r *recordingSyncer) synced() []*domain.Game {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.games)
+}
+
 type gameServiceFixture struct {
 	store  *fakeGameStore
 	random *sequenceRandom
+	live   *recordingSyncer
 	svc    *GameService
 }
 
@@ -217,8 +236,9 @@ func newGameServiceFixture() *gameServiceFixture {
 	f := &gameServiceFixture{
 		store:  newFakeGameStore(),
 		random: &sequenceRandom{values: []int{482913}},
+		live:   &recordingSyncer{},
 	}
-	f.svc = NewGameService(f.store, f.random)
+	f.svc = NewGameService(f.store, f.random, f.live)
 	return f
 }
 
@@ -762,4 +782,93 @@ func TestGameServiceCancel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGameServiceMirrorsCommittedChangesIntoLiveState(t *testing.T) {
+	host, guest := uuid.New(), uuid.New()
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		run        func(f *gameServiceFixture, g *domain.Game) error
+		wantStatus domain.GameStatus
+		wantHost   uuid.UUID
+		wantCount  int
+	}{
+		{
+			name: "join", wantStatus: domain.GameStatusWaiting, wantHost: host, wantCount: 2,
+			run: func(f *gameServiceFixture, g *domain.Game) error {
+				_, err := f.svc.Join(ctx, guest, g.ID.String())
+				return err
+			},
+		},
+		{
+			name: "settings", wantStatus: domain.GameStatusWaiting, wantHost: host, wantCount: 1,
+			run: func(f *gameServiceFixture, g *domain.Game) error {
+				_, err := f.svc.UpdateSettings(ctx, host, g.ID.String(), validSettingsInput)
+				return err
+			},
+		},
+		{
+			name: "host leaves", wantStatus: domain.GameStatusCancelled, wantHost: host, wantCount: 0,
+			run: func(f *gameServiceFixture, g *domain.Game) error { return f.svc.Leave(ctx, host, g.ID.String()) },
+		},
+		{
+			name: "cancel", wantStatus: domain.GameStatusCancelled, wantHost: host, wantCount: 1,
+			run: func(f *gameServiceFixture, g *domain.Game) error { return f.svc.Cancel(ctx, host, g.ID.String()) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newGameServiceFixture()
+			g := f.store.seed(domain.GameStatusWaiting, "112233", validSettings, host)
+
+			if err := tt.run(f, g); err != nil {
+				t.Fatalf("error = %v", err)
+			}
+			synced := f.live.synced()
+			if len(synced) != 1 {
+				t.Fatalf("synced %d games, want 1", len(synced))
+			}
+			if s := synced[0]; s.ID != g.ID || s.Status != tt.wantStatus || s.HostID != tt.wantHost || s.PlayerCount != tt.wantCount {
+				t.Errorf("synced %+v, want status %s, host %s, %d players", s, tt.wantStatus, tt.wantHost, tt.wantCount)
+			}
+		})
+	}
+
+	t.Run("create and start", func(t *testing.T) {
+		f := newGameServiceFixture()
+		g, err := f.svc.Create(ctx, host, validSettingsInput)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.svc.Join(ctx, guest, g.ID.String()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.svc.Start(ctx, host, g.ID.String()); err != nil {
+			t.Fatal(err)
+		}
+		statuses := []domain.GameStatus{}
+		for _, s := range f.live.synced() {
+			statuses = append(statuses, s.Status)
+		}
+		want := []domain.GameStatus{domain.GameStatusWaiting, domain.GameStatusWaiting, domain.GameStatusInProgress}
+		if !slices.Equal(statuses, want) {
+			t.Errorf("synced statuses = %v, want %v", statuses, want)
+		}
+	})
+
+	t.Run("nothing is mirrored when the change fails", func(t *testing.T) {
+		f := newGameServiceFixture()
+		g := f.store.seed(domain.GameStatusWaiting, "445566", validSettings, host)
+		if _, err := f.svc.Start(ctx, guest, g.ID.String()); !errors.Is(err, domain.ErrNotGameHost) {
+			t.Fatalf("Start() error = %v, want ErrNotGameHost", err)
+		}
+		if _, err := f.svc.Create(ctx, host, GameSettingsInput{}); err == nil {
+			t.Fatal("Create() with invalid settings succeeded")
+		}
+		if n := len(f.live.synced()); n != 0 {
+			t.Errorf("synced %d games after failures, want 0", n)
+		}
+	})
 }

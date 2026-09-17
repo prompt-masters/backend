@@ -19,6 +19,7 @@ import (
 	"github.com/prompt-masters/backend/internal/mail"
 	"github.com/prompt-masters/backend/internal/redisclient"
 	"github.com/prompt-masters/backend/internal/repository/postgres"
+	"github.com/prompt-masters/backend/internal/repository/redisstore"
 	"github.com/prompt-masters/backend/internal/service"
 )
 
@@ -74,7 +75,17 @@ func run(logger *log.Logger) error {
 
 	authService := service.NewAuthService(userRepo, tokenRepo, refreshTokenRepo, sender, *cfg)
 	challengeService := service.NewChallengeService(challengeRepo)
-	gameService := service.NewGameService(transactor, service.MathRandom{})
+	gameStateStore, err := redisstore.New(redisClient, redisstore.Options{
+		KeyPrefix: cfg.Redis.KeyPrefix,
+		ActiveTTL: cfg.Redis.ActiveGameTTL,
+		EndedTTL:  cfg.Redis.EndedGameTTL,
+		OpTimeout: cfg.Redis.OpTimeout,
+	})
+	if err != nil {
+		return err
+	}
+	liveStateService := service.NewLiveStateService(gameStateStore, transactor, logger, time.Now)
+	gameService := service.NewGameService(transactor, service.MathRandom{}, liveStateService)
 
 	healthChecks := []handler.HealthCheck{
 		{Name: "postgres", Critical: true, Check: pool.Ping},

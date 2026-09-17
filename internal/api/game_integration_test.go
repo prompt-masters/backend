@@ -69,7 +69,7 @@ func newTestAPI(t *testing.T) *testAPI {
 		config.Config{JWTSecret: jwtSecret, JWTTTL: time.Hour},
 	)
 	challengeService := service.NewChallengeService(challengeRepo)
-	gameService := service.NewGameService(postgres.NewTransactor(pool), service.MathRandom{})
+	gameService := service.NewGameService(postgres.NewTransactor(pool), service.MathRandom{}, noopSyncer{})
 
 	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, nil, logger, jwtSecret).Routes())
 	t.Cleanup(server.Close)
@@ -627,3 +627,8 @@ func TestConcurrentJoinsCannotLandAfterStart(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// noopSyncer keeps the lobby tests independent of Redis.
+type noopSyncer struct{}
+
+func (noopSyncer) SyncGame(context.Context, *domain.Game) {}
