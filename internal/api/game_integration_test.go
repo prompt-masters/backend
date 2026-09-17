@@ -20,9 +20,11 @@ import (
 	"github.com/prompt-masters/backend/internal/domain"
 	"github.com/prompt-masters/backend/internal/mail"
 	"github.com/prompt-masters/backend/internal/repository/postgres"
+	"github.com/prompt-masters/backend/internal/repository/redisstore"
 	"github.com/prompt-masters/backend/internal/service"
 	"github.com/prompt-masters/backend/internal/testutil/pgtest"
 	"github.com/prompt-masters/backend/internal/util"
+	"github.com/redis/go-redis/v9"
 )
 
 const jwtSecret = "integration-test-secret"
@@ -34,9 +36,20 @@ type testAPI struct {
 	t      *testing.T
 	server *httptest.Server
 	users  *postgres.UserRepository
+	// live and logs are set when the API is built with Redis.
+	live *service.LiveStateService
+	logs *syncBuffer
 }
 
+// newTestAPI builds the API without live state: lobby changes are not
+// mirrored anywhere.
 func newTestAPI(t *testing.T) *testAPI {
+	return buildTestAPI(t, nil, "")
+}
+
+// buildTestAPI builds the API. With a Redis client, live state is stored under
+// keyPrefix and lobby changes are mirrored into it.
+func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix string) *testAPI {
 	t.Helper()
 	pool := pgtest.NewPool(t)
 	queries := db.New(pool)
@@ -60,7 +73,8 @@ func newTestAPI(t *testing.T) *testAPI {
 		}
 	}
 
-	logger := log.New(io.Discard, "", 0)
+	logs := &syncBuffer{}
+	logger := log.New(logs, "", 0)
 	authService := service.NewAuthService(
 		userRepo,
 		postgres.NewVerificationTokenRepository(queries),
@@ -69,11 +83,48 @@ func newTestAPI(t *testing.T) *testAPI {
 		config.Config{JWTSecret: jwtSecret, JWTTTL: time.Hour},
 	)
 	challengeService := service.NewChallengeService(challengeRepo)
-	gameService := service.NewGameService(postgres.NewTransactor(pool), service.MathRandom{}, noopSyncer{})
+	transactor := postgres.NewTransactor(pool)
 
-	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, nil, logger, jwtSecret).Routes())
+	var (
+		live   *service.LiveStateService
+		syncer service.LiveStateSyncer = noopSyncer{}
+	)
+	if redisClient != nil {
+		store, err := redisstore.New(redisClient, redisstore.Options{
+			KeyPrefix: keyPrefix,
+			ActiveTTL: 2 * time.Hour,
+			EndedTTL:  15 * time.Minute,
+			OpTimeout: 500 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("creating game state store: %v", err)
+		}
+		live = service.NewLiveStateService(store, transactor, logger, time.Now)
+		syncer = live
+	}
+	gameService := service.NewGameService(transactor, service.MathRandom{}, syncer)
+
+	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, nil, logger, jwtSecret).Routes())
 	t.Cleanup(server.Close)
-	return &testAPI{t: t, server: server, users: userRepo}
+	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs}
+}
+
+// syncBuffer is a log destination safe to read while handlers write to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 type testUser struct {

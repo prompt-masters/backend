@@ -91,7 +91,7 @@ func run(logger *log.Logger) error {
 		{Name: "postgres", Critical: true, Check: pool.Ping},
 		{Name: "redis", Check: func(ctx context.Context) error { return redisClient.Ping(ctx).Err() }},
 	}
-	server := api.NewServer(authService, challengeService, gameService, healthChecks, logger, cfg.JWTSecret)
+	server := api.NewServer(authService, challengeService, gameService, liveStateService, healthChecks, logger, cfg.JWTSecret)
 
 	s := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),

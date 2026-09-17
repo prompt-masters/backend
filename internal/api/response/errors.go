@@ -10,6 +10,8 @@ import (
 	"github.com/prompt-masters/backend/internal/service"
 )
 
+const liveStateRetryAfterSeconds = "5"
+
 // WriteDomainError maps a service or domain error onto the matching HTTP
 // response, logging unexpected errors before answering with a 500.
 func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
@@ -47,6 +49,16 @@ func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 		WriteError(w, http.StatusConflict, "You have already joined this game.")
 	case errors.Is(err, domain.ErrNotInGame):
 		WriteError(w, http.StatusConflict, "You are not a player in this game.")
+	case errors.Is(err, domain.ErrNotGamePlayer):
+		WriteError(w, http.StatusForbidden, "Only players of this game can do this.")
+	case errors.Is(err, domain.ErrGameNotInProgress):
+		WriteError(w, http.StatusConflict, "This game is not in progress.")
+	case errors.Is(err, domain.ErrStateNotFound):
+		WriteError(w, http.StatusNotFound, "The requested live state was not found.")
+	case errors.Is(err, domain.ErrStateUnavailable):
+		// The service has already logged the failure with its context.
+		w.Header().Set("Retry-After", liveStateRetryAfterSeconds)
+		WriteError(w, http.StatusServiceUnavailable, "Live game state is temporarily unavailable. Please retry shortly.")
 	case errors.Is(err, domain.ErrNotEnoughPlayers):
 		WriteError(w, http.StatusConflict, fmt.Sprintf("At least %d players are needed to start.", domain.MinPlayers))
 	case errors.Is(err, domain.ErrNotFound):

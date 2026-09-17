@@ -51,22 +51,26 @@ type GamePlayerResponse struct {
 
 func GameSummaryFromDomain(g *domain.Game) GameSummaryResponse {
 	return GameSummaryResponse{
-		ID:       g.ID.String(),
-		RoomCode: g.RoomCode,
-		HostID:   g.HostID.String(),
-		Status:   g.Status,
-		Settings: GameSettingsResponse{
-			Rounds:       g.Settings.Rounds,
-			TimePerRound: g.Settings.TimePerRoundSeconds,
-			Difficulty:   g.Settings.Difficulty,
-			Category:     g.Settings.Category,
-			AIModel:      g.Settings.AIModel,
-			MaxPlayers:   g.Settings.MaxPlayers,
-		},
+		ID:          g.ID.String(),
+		RoomCode:    g.RoomCode,
+		HostID:      g.HostID.String(),
+		Status:      g.Status,
+		Settings:    settingsFromDomain(g.Settings),
 		PlayerCount: g.PlayerCount,
 		CreatedAt:   g.CreatedAt,
 		UpdatedAt:   g.UpdatedAt,
 		StartedAt:   g.StartedAt,
+	}
+}
+
+func settingsFromDomain(s domain.GameSettings) GameSettingsResponse {
+	return GameSettingsResponse{
+		Rounds:       s.Rounds,
+		TimePerRound: s.TimePerRoundSeconds,
+		Difficulty:   s.Difficulty,
+		Category:     s.Category,
+		AIModel:      s.AIModel,
+		MaxPlayers:   s.MaxPlayers,
 	}
 }
 

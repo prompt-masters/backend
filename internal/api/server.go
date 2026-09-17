@@ -14,6 +14,7 @@ type Server struct {
 	challenges *handler.ChallengeHandler
 	games      *handler.GameHandler
 	health     *handler.HealthHandler
+	liveState  *handler.LiveStateHandler
 	logger     *log.Logger
 	jwtSecret  string
 }
@@ -22,6 +23,7 @@ func NewServer(
 	authService *service.AuthService,
 	challengeService *service.ChallengeService,
 	gameService *service.GameService,
+	liveStateService *service.LiveStateService,
 	healthChecks []handler.HealthCheck,
 	logger *log.Logger,
 	jwtSecret string,
@@ -31,6 +33,7 @@ func NewServer(
 		challenges: handler.NewChallengeHandler(challengeService, logger),
 		games:      handler.NewGameHandler(gameService, logger),
 		health:     handler.NewHealthHandler(healthChecks, logger),
+		liveState:  handler.NewLiveStateHandler(liveStateService, logger),
 		logger:     logger,
 		jwtSecret:  jwtSecret,
 	}
@@ -65,6 +68,11 @@ func (s *Server) Routes() http.Handler {
 	protected("POST", "/api/v1/games/{id}/leave", s.games.Leave)
 	protected("POST", "/api/v1/games/{id}/start", s.games.Start)
 	protected("DELETE", "/api/v1/games/{id}", s.games.Cancel)
+	protected("GET", "/api/v1/games/{id}/live", s.liveState.Get)
+	protected("PUT", "/api/v1/games/{id}/ready", s.liveState.SetReady)
+	protected("DELETE", "/api/v1/games/{id}/ready", s.liveState.UnsetReady)
+	protected("GET", "/api/v1/games/{id}/draft", s.liveState.GetDraft)
+	protected("PUT", "/api/v1/games/{id}/draft", s.liveState.SaveDraft)
 
 	return mux
 }
