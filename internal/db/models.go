@@ -8,6 +8,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Challenge struct {
+	ID            pgtype.UUID
+	Slug          string
+	Title         string
+	Description   string
+	Category      string
+	Difficulty    string
+	Constraints   []byte
+	JudgeCriteria []byte
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
+}
+
 type RefreshToken struct {
 	TokenHash string
 	UserID    pgtype.UUID
