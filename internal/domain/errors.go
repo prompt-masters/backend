@@ -11,4 +11,5 @@ var (
 	ErrInvalidVerificationToken = errors.New("verification token is invalid")
 	ErrVerificationTokenExpired = errors.New("verification token has expired")
 	ErrInvalidRefreshToken      = errors.New("refresh token is invalid")
+	ErrNoEligibleChallenge      = errors.New("no challenge matches the game configuration")
 )

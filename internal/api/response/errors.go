@@ -32,6 +32,8 @@ func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 		WriteError(w, http.StatusUnauthorized, "A valid refresh token is required.")
 	case errors.Is(err, domain.ErrEmailNotVerified):
 		WriteError(w, http.StatusForbidden, "Please verify your email address before signing in.")
+	case errors.Is(err, domain.ErrNoEligibleChallenge):
+		WriteError(w, http.StatusNotFound, "No challenge matches the game configuration.")
 	case errors.Is(err, domain.ErrNotFound):
 		WriteError(w, http.StatusNotFound, "The requested resource was not found.")
 	case errors.Is(err, domain.ErrInvalidVerificationToken):
