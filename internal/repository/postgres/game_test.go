@@ -147,7 +147,8 @@ func TestGameRepositoryRoomCodeCollisionKeepsTransactionUsable(t *testing.T) {
 	host := f.user(t, "host")
 	f.game(t, host, "111111")
 
-	err := NewGameTransactor(f.pool).WithinTx(context.Background(), func(games repository.GameRepository) error {
+	err := NewTransactor(f.pool).WithinTx(context.Background(), func(repos repository.TxRepositories) error {
+		games := repos.Games
 		if _, err := games.Create(context.Background(), host, "111111"); !errors.Is(err, domain.ErrRoomCodeTaken) {
 			return fmt.Errorf("colliding Create() error = %v, want ErrRoomCodeTaken", err)
 		}
@@ -289,7 +290,8 @@ func TestGameTransactorRollsBackOnError(t *testing.T) {
 	host := f.user(t, "host")
 	wantErr := errors.New("abort")
 
-	err := NewGameTransactor(f.pool).WithinTx(ctx, func(games repository.GameRepository) error {
+	err := NewTransactor(f.pool).WithinTx(ctx, func(repos repository.TxRepositories) error {
+		games := repos.Games
 		if _, err := games.Create(ctx, host, "777777"); err != nil {
 			return err
 		}
@@ -306,13 +308,14 @@ func TestGameTransactorRollsBackOnError(t *testing.T) {
 func TestGameRepositoryLockByIDBlocksConcurrentLockers(t *testing.T) {
 	f := newGameFixture(t)
 	g := f.game(t, f.user(t, "host"), "888888")
-	tx := NewGameTransactor(f.pool)
+	tx := NewTransactor(f.pool)
 
 	locked := make(chan struct{})
 	release := make(chan struct{})
 	holderDone := make(chan error, 1)
 	go func() {
-		holderDone <- tx.WithinTx(context.Background(), func(games repository.GameRepository) error {
+		holderDone <- tx.WithinTx(context.Background(), func(repos repository.TxRepositories) error {
+			games := repos.Games
 			if _, err := games.LockByID(context.Background(), g.ID); err != nil {
 				return err
 			}
@@ -325,7 +328,8 @@ func TestGameRepositoryLockByIDBlocksConcurrentLockers(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	err := tx.WithinTx(ctx, func(games repository.GameRepository) error {
+	err := tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
+		games := repos.Games
 		_, err := games.LockByID(ctx, g.ID)
 		return err
 	})
@@ -338,11 +342,69 @@ func TestGameRepositoryLockByIDBlocksConcurrentLockers(t *testing.T) {
 		t.Fatalf("lock holder error = %v", err)
 	}
 
-	err = tx.WithinTx(context.Background(), func(games repository.GameRepository) error {
+	err = tx.WithinTx(context.Background(), func(repos repository.TxRepositories) error {
+		games := repos.Games
 		_, err := games.LockByID(context.Background(), g.ID)
 		return err
 	})
 	if err != nil {
 		t.Errorf("LockByID() after release error = %v", err)
+	}
+}
+
+// A transaction that waits for the lock must see what the previous holder
+// committed; a stale player count here is what lets concurrent joins overfill
+// a room.
+func TestGameRepositoryLockByIDSeesChangesCommittedWhileWaiting(t *testing.T) {
+	f := newGameFixture(t)
+	host, guest := f.user(t, "host"), f.user(t, "guest")
+	g := f.game(t, host, "999999")
+	tx := NewTransactor(f.pool)
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- tx.WithinTx(context.Background(), func(repos repository.TxRepositories) error {
+			games := repos.Games
+			if _, err := games.LockByID(context.Background(), g.ID); err != nil {
+				return err
+			}
+			if err := games.AddPlayer(context.Background(), g.ID, guest); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	waiterDone := make(chan *domain.Game, 1)
+	go func() {
+		_ = tx.WithinTx(context.Background(), func(repos repository.TxRepositories) error {
+			games := repos.Games
+			got, err := games.LockByID(context.Background(), g.ID)
+			if err != nil {
+				t.Errorf("waiting LockByID() error = %v", err)
+			}
+			waiterDone <- got
+			return err
+		})
+	}()
+
+	// Give the waiter time to block on the lock before the holder commits.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	if err := <-holderDone; err != nil {
+		t.Fatalf("lock holder error = %v", err)
+	}
+
+	got := <-waiterDone
+	if got == nil {
+		t.Fatal("waiting LockByID() returned no game")
+	}
+	if got.PlayerCount != 2 || len(got.Players) != 2 {
+		t.Errorf("after waiting: PlayerCount = %d, players = %d; want 2 (the committed join)", got.PlayerCount, len(got.Players))
 	}
 }

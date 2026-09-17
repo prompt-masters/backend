@@ -14,14 +14,15 @@ import (
 	"github.com/prompt-masters/backend/internal/repository"
 )
 
-// fakeGameStore is an in-memory repository.GameTransactor. Transactions are
+// fakeGameStore is an in-memory repository.Transactor. Transactions are
 // serialized by one mutex, standing in for the game row lock, and a failed
 // transaction restores the state it started from.
 type fakeGameStore struct {
-	mu        sync.Mutex
-	games     map[uuid.UUID]*domain.Game
-	usernames map[uuid.UUID]string
-	clock     time.Time
+	mu         sync.Mutex
+	games      map[uuid.UUID]*domain.Game
+	challenges *fakeChallengeRepository
+	usernames  map[uuid.UUID]string
+	clock      time.Time
 	// addPlayerErr, when set, makes AddPlayer fail.
 	addPlayerErr error
 }
@@ -31,10 +32,13 @@ func newFakeGameStore() *fakeGameStore {
 		games:     map[uuid.UUID]*domain.Game{},
 		usernames: map[uuid.UUID]string{},
 		clock:     time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC),
+		challenges: &fakeChallengeRepository{challenges: []*domain.Challenge{
+			newChallenge("coding-medium", domain.CategoryCoding, domain.DifficultyMedium),
+		}},
 	}
 }
 
-func (s *fakeGameStore) WithinTx(ctx context.Context, fn func(repository.GameRepository) error) error {
+func (s *fakeGameStore) WithinTx(ctx context.Context, fn func(repository.TxRepositories) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -42,7 +46,7 @@ func (s *fakeGameStore) WithinTx(ctx context.Context, fn func(repository.GameRep
 	for id, g := range s.games {
 		snapshot[id] = cloneGame(g)
 	}
-	if err := fn(fakeGameRepo{s}); err != nil {
+	if err := fn(repository.TxRepositories{Games: fakeGameRepo{s}, Challenges: s.challenges}); err != nil {
 		s.games = snapshot
 		return err
 	}
@@ -173,20 +177,6 @@ func (r fakeGameRepo) UpdateStatus(_ context.Context, gameID uuid.UUID, status d
 	return nil
 }
 
-// fakeChallengePicker records requests and answers with err or a challenge.
-type fakeChallengePicker struct {
-	err      error
-	requests []ChallengeRequest
-}
-
-func (f *fakeChallengePicker) Create(_ context.Context, req ChallengeRequest) (*domain.Challenge, error) {
-	f.requests = append(f.requests, req)
-	if f.err != nil {
-		return nil, f.err
-	}
-	return &domain.Challenge{ID: uuid.New(), Category: req.Category, Difficulty: req.Difficulty}, nil
-}
-
 // sequenceRandom returns its values in order, then repeats the last one.
 type sequenceRandom struct {
 	values []int
@@ -218,19 +208,17 @@ var validSettings = domain.GameSettings{
 }
 
 type gameServiceFixture struct {
-	store      *fakeGameStore
-	challenges *fakeChallengePicker
-	random     *sequenceRandom
-	svc        *GameService
+	store  *fakeGameStore
+	random *sequenceRandom
+	svc    *GameService
 }
 
 func newGameServiceFixture() *gameServiceFixture {
 	f := &gameServiceFixture{
-		store:      newFakeGameStore(),
-		challenges: &fakeChallengePicker{},
-		random:     &sequenceRandom{values: []int{482913}},
+		store:  newFakeGameStore(),
+		random: &sequenceRandom{values: []int{482913}},
 	}
-	f.svc = NewGameService(f.store, f.challenges, f.random)
+	f.svc = NewGameService(f.store, f.random)
 	return f
 }
 
@@ -683,29 +671,31 @@ func TestGameServiceStart(t *testing.T) {
 	host, guest := uuid.New(), uuid.New()
 
 	tests := []struct {
-		name             string
-		status           domain.GameStatus
-		players          []uuid.UUID
-		caller           uuid.UUID
-		pickerErr        error
-		wantErr          error
-		wantPickerCalled bool
+		name                string
+		status              domain.GameStatus
+		players             []uuid.UUID
+		caller              uuid.UUID
+		noChallenges        bool
+		wantErr             error
+		wantChallengeLookup bool
 	}{
-		{name: "host starts a ready game", status: domain.GameStatusWaiting, players: []uuid.UUID{host, guest}, caller: host, wantPickerCalled: true},
+		{name: "host starts a ready game", status: domain.GameStatusWaiting, players: []uuid.UUID{host, guest}, caller: host, wantChallengeLookup: true},
 		{name: "non-host is forbidden", status: domain.GameStatusWaiting, players: []uuid.UUID{host, guest}, caller: guest, wantErr: domain.ErrNotGameHost},
 		{name: "already started", status: domain.GameStatusInProgress, players: []uuid.UUID{host, guest}, caller: host, wantErr: domain.ErrGameNotWaiting},
 		{name: "cancelled", status: domain.GameStatusCancelled, players: []uuid.UUID{host, guest}, caller: host, wantErr: domain.ErrGameNotWaiting},
 		{name: "not enough players", status: domain.GameStatusWaiting, players: []uuid.UUID{host}, caller: host, wantErr: domain.ErrNotEnoughPlayers},
 		{
 			name: "no eligible challenge", status: domain.GameStatusWaiting, players: []uuid.UUID{host, guest}, caller: host,
-			pickerErr: domain.ErrNoEligibleChallenge, wantErr: domain.ErrNoEligibleChallenge, wantPickerCalled: true,
+			noChallenges: true, wantErr: domain.ErrNoEligibleChallenge, wantChallengeLookup: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newGameServiceFixture()
-			f.challenges.err = tt.pickerErr
+			if tt.noChallenges {
+				f.store.challenges.challenges = nil
+			}
 			g := f.store.seed(tt.status, "975310", validSettings, tt.players...)
 
 			got, err := f.svc.Start(context.Background(), tt.caller, g.ID.String())
@@ -713,13 +703,14 @@ func TestGameServiceStart(t *testing.T) {
 				t.Fatalf("Start() error = %v, want %v", err, tt.wantErr)
 			}
 
-			if called := len(f.challenges.requests) > 0; called != tt.wantPickerCalled {
-				t.Errorf("challenge picker called = %v, want %v", called, tt.wantPickerCalled)
+			if looked := f.store.challenges.listCalls > 0; looked != tt.wantChallengeLookup {
+				t.Errorf("challenges looked up = %v, want %v", looked, tt.wantChallengeLookup)
 			}
-			if tt.wantPickerCalled {
-				want := ChallengeRequest{Category: validSettings.Category, Difficulty: validSettings.Difficulty}
-				if req := f.challenges.requests[0]; req.Category != want.Category || req.Difficulty != want.Difficulty {
-					t.Errorf("challenge request = %+v, want %+v", req, want)
+			if tt.wantChallengeLookup {
+				filter := f.store.challenges.lastFilter
+				if filter.Category == nil || *filter.Category != validSettings.Category ||
+					filter.Difficulty == nil || *filter.Difficulty != validSettings.Difficulty {
+					t.Errorf("challenge filter = %+v, want the game's category and difficulty", filter)
 				}
 			}
 

@@ -28,13 +28,11 @@ JOIN game_settings s ON s.game_id = g.id
 WHERE g.id = $1;
 
 -- name: LockGameByID :one
--- Row-locks the game so membership and status changes are serialized.
-SELECT sqlc.embed(g), sqlc.embed(s),
-       (SELECT COUNT(*) FROM game_players p WHERE p.game_id = g.id)::int AS player_count
-FROM games g
-JOIN game_settings s ON s.game_id = g.id
-WHERE g.id = $1
-FOR UPDATE OF g;
+-- Row-locks the game so membership and status changes are serialized. Read
+-- the game in a later statement: in READ COMMITTED, anything else computed by
+-- this statement (such as a player count subquery) would use the snapshot from
+-- before the lock wait and miss changes committed by the previous lock holder.
+SELECT id FROM games WHERE id = $1 FOR UPDATE;
 
 -- name: GetActiveGameIDByRoomCode :one
 SELECT id FROM games

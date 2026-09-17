@@ -31,10 +31,3 @@ type GameRepository interface {
 	UpdateHost(ctx context.Context, gameID, hostID uuid.UUID) error
 	UpdateStatus(ctx context.Context, gameID uuid.UUID, status domain.GameStatus) error
 }
-
-// GameTransactor runs fn in a single database transaction, handing it a
-// GameRepository bound to that transaction. The transaction commits when fn
-// returns nil and rolls back otherwise.
-type GameTransactor interface {
-	WithinTx(ctx context.Context, fn func(games GameRepository) error) error
-}

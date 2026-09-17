@@ -224,43 +224,18 @@ func (q *Queries) ListGamesByStatus(ctx context.Context, arg ListGamesByStatusPa
 }
 
 const LockGameByID = `-- name: LockGameByID :one
-SELECT g.id, g.room_code, g.host_id, g.status, g.created_at, g.updated_at, g.started_at, s.game_id, s.rounds, s.time_per_round, s.difficulty, s.category, s.ai_model, s.max_players, s.updated_at,
-       (SELECT COUNT(*) FROM game_players p WHERE p.game_id = g.id)::int AS player_count
-FROM games g
-JOIN game_settings s ON s.game_id = g.id
-WHERE g.id = $1
-FOR UPDATE OF g
+SELECT id FROM games WHERE id = $1 FOR UPDATE
 `
 
-type LockGameByIDRow struct {
-	Game        Game
-	GameSetting GameSetting
-	PlayerCount int32
-}
-
-// Row-locks the game so membership and status changes are serialized.
-func (q *Queries) LockGameByID(ctx context.Context, id pgtype.UUID) (*LockGameByIDRow, error) {
+// Row-locks the game so membership and status changes are serialized. Read
+// the game in a later statement: in READ COMMITTED, anything else computed by
+// this statement (such as a player count subquery) would use the snapshot from
+// before the lock wait and miss changes committed by the previous lock holder.
+func (q *Queries) LockGameByID(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
 	row := q.db.QueryRow(ctx, LockGameByID, id)
-	var i LockGameByIDRow
-	err := row.Scan(
-		&i.Game.ID,
-		&i.Game.RoomCode,
-		&i.Game.HostID,
-		&i.Game.Status,
-		&i.Game.CreatedAt,
-		&i.Game.UpdatedAt,
-		&i.Game.StartedAt,
-		&i.GameSetting.GameID,
-		&i.GameSetting.Rounds,
-		&i.GameSetting.TimePerRound,
-		&i.GameSetting.Difficulty,
-		&i.GameSetting.Category,
-		&i.GameSetting.AiModel,
-		&i.GameSetting.MaxPlayers,
-		&i.GameSetting.UpdatedAt,
-		&i.PlayerCount,
-	)
-	return &i, err
+	var id_2 pgtype.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
 }
 
 const RemoveGamePlayer = `-- name: RemoveGamePlayer :execrows

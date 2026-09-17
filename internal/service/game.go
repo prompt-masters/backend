@@ -20,11 +20,6 @@ const (
 	gameListLimit       = 100
 )
 
-// ChallengePicker selects challenges for a game; ChallengeFactory satisfies it.
-type ChallengePicker interface {
-	Create(ctx context.Context, req ChallengeRequest) (*domain.Challenge, error)
-}
-
 type GameSettingsInput struct {
 	Rounds       int
 	TimePerRound int
@@ -42,13 +37,14 @@ type GameSettingsInput struct {
 // Game references accept either the game's UUID or the six-digit room code of
 // an active game.
 type GameService struct {
-	tx         repository.GameTransactor
-	challenges ChallengePicker
-	random     Random
+	tx     repository.Transactor
+	random Random
 }
 
-func NewGameService(tx repository.GameTransactor, challenges ChallengePicker, random Random) *GameService {
-	return &GameService{tx: tx, challenges: challenges, random: random}
+// NewGameService uses random for room codes and for the ChallengeFactory that
+// checks a game can start.
+func NewGameService(tx repository.Transactor, random Random) *GameService {
+	return &GameService{tx: tx, random: random}
 }
 
 // List returns up to gameListLimit games in the given status, newest first.
@@ -65,9 +61,9 @@ func (s *GameService) List(ctx context.Context, status string) ([]*domain.Game, 
 	}
 
 	var games []*domain.Game
-	err := s.tx.WithinTx(ctx, func(repo repository.GameRepository) error {
+	err := s.tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
 		var err error
-		games, err = repo.ListByStatus(ctx, st, gameListLimit)
+		games, err = repos.Games.ListByStatus(ctx, st, gameListLimit)
 		return err
 	})
 	return games, err
@@ -82,7 +78,8 @@ func (s *GameService) Create(ctx context.Context, hostID uuid.UUID, in GameSetti
 	}
 
 	var game *domain.Game
-	err = s.tx.WithinTx(ctx, func(repo repository.GameRepository) error {
+	err = s.tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
+		repo := repos.Games
 		created, err := s.createWithUniqueRoomCode(ctx, repo, hostID)
 		if err != nil {
 			return err
@@ -101,7 +98,8 @@ func (s *GameService) Create(ctx context.Context, hostID uuid.UUID, in GameSetti
 
 func (s *GameService) Get(ctx context.Context, ref string) (*domain.Game, error) {
 	var game *domain.Game
-	err := s.tx.WithinTx(ctx, func(repo repository.GameRepository) error {
+	err := s.tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
+		repo := repos.Games
 		id, err := resolveGameID(ctx, repo, ref)
 		if err != nil {
 			return err
@@ -121,7 +119,7 @@ func (s *GameService) UpdateSettings(ctx context.Context, userID uuid.UUID, ref 
 		return nil, err
 	}
 
-	return s.mutate(ctx, ref, func(repo repository.GameRepository, g *domain.Game) error {
+	return s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if !g.IsHost(userID) {
 			return domain.ErrNotGameHost
 		}
@@ -133,13 +131,13 @@ func (s *GameService) UpdateSettings(ctx context.Context, userID uuid.UUID, ref 
 				"max_players": fmt.Sprintf("must not be less than the current player count (%d)", g.PlayerCount),
 			}}
 		}
-		return repo.UpdateSettings(ctx, g.ID, settings)
+		return repos.Games.UpdateSettings(ctx, g.ID, settings)
 	})
 }
 
 // Join adds userID to a waiting game that has room for another player.
 func (s *GameService) Join(ctx context.Context, userID uuid.UUID, ref string) (*domain.Game, error) {
-	return s.mutate(ctx, ref, func(repo repository.GameRepository, g *domain.Game) error {
+	return s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if g.Status != domain.GameStatusWaiting {
 			return domain.ErrGameNotWaiting
 		}
@@ -149,7 +147,7 @@ func (s *GameService) Join(ctx context.Context, userID uuid.UUID, ref string) (*
 		if g.PlayerCount >= g.Settings.MaxPlayers {
 			return domain.ErrGameFull
 		}
-		return repo.AddPlayer(ctx, g.ID, userID)
+		return repos.Games.AddPlayer(ctx, g.ID, userID)
 	})
 }
 
@@ -157,14 +155,14 @@ func (s *GameService) Join(ctx context.Context, userID uuid.UUID, ref string) (*
 // passes to the player who joined earliest; when no players remain the game
 // is cancelled.
 func (s *GameService) Leave(ctx context.Context, userID uuid.UUID, ref string) error {
-	_, err := s.mutate(ctx, ref, func(repo repository.GameRepository, g *domain.Game) error {
+	_, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if !g.HasPlayer(userID) {
 			return domain.ErrNotInGame
 		}
 		if g.Status != domain.GameStatusWaiting {
 			return domain.ErrGameNotWaiting
 		}
-		if err := repo.RemovePlayer(ctx, g.ID, userID); err != nil {
+		if err := repos.Games.RemovePlayer(ctx, g.ID, userID); err != nil {
 			return err
 		}
 		if !g.IsHost(userID) {
@@ -175,10 +173,10 @@ func (s *GameService) Leave(ctx context.Context, userID uuid.UUID, ref string) e
 		// the longest-waiting one.
 		for _, p := range g.Players {
 			if p.UserID != userID {
-				return repo.UpdateHost(ctx, g.ID, p.UserID)
+				return repos.Games.UpdateHost(ctx, g.ID, p.UserID)
 			}
 		}
-		return repo.UpdateStatus(ctx, g.ID, domain.GameStatusCancelled)
+		return repos.Games.UpdateStatus(ctx, g.ID, domain.GameStatusCancelled)
 	})
 	return err
 }
@@ -186,45 +184,48 @@ func (s *GameService) Leave(ctx context.Context, userID uuid.UUID, ref string) e
 // Start moves a waiting game to in_progress once the host asks and the game
 // is ready: see checkReadyToStart.
 func (s *GameService) Start(ctx context.Context, userID uuid.UUID, ref string) (*domain.Game, error) {
-	return s.mutate(ctx, ref, func(repo repository.GameRepository, g *domain.Game) error {
+	return s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if !g.IsHost(userID) {
 			return domain.ErrNotGameHost
 		}
 		if g.Status != domain.GameStatusWaiting {
 			return domain.ErrGameNotWaiting
 		}
-		if err := s.checkReadyToStart(ctx, g); err != nil {
+		if err := s.checkReadyToStart(ctx, repos.Challenges, g); err != nil {
 			return err
 		}
-		return repo.UpdateStatus(ctx, g.ID, domain.GameStatusInProgress)
+		return repos.Games.UpdateStatus(ctx, g.ID, domain.GameStatusInProgress)
 	})
 }
 
 // Cancel ends a waiting or in-progress game. Only the host may cancel; the
 // game is kept with status cancelled rather than deleted.
 func (s *GameService) Cancel(ctx context.Context, userID uuid.UUID, ref string) error {
-	_, err := s.mutate(ctx, ref, func(repo repository.GameRepository, g *domain.Game) error {
+	_, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if !g.IsHost(userID) {
 			return domain.ErrNotGameHost
 		}
 		if !g.Status.Cancellable() {
 			return domain.ErrGameNotCancellable
 		}
-		return repo.UpdateStatus(ctx, g.ID, domain.GameStatusCancelled)
+		return repos.Games.UpdateStatus(ctx, g.ID, domain.GameStatusCancelled)
 	})
 	return err
 }
 
 // checkReadyToStart defines when a game may start:
 //   - at least domain.MinPlayers players have joined, and
-//   - the challenge pool has at least one challenge for the game's category
+//   - ChallengeFactory finds at least one challenge for the game's category
 //     and difficulty. The factory repeats challenges once the pool is used up,
 //     so one eligible challenge is enough for any number of rounds.
-func (s *GameService) checkReadyToStart(ctx context.Context, g *domain.Game) error {
+//
+// The factory reads through the transaction's challenge repository because
+// the game row is locked at this point; see repository.Transactor.
+func (s *GameService) checkReadyToStart(ctx context.Context, challenges repository.ChallengeRepository, g *domain.Game) error {
 	if g.PlayerCount < domain.MinPlayers {
 		return domain.ErrNotEnoughPlayers
 	}
-	_, err := s.challenges.Create(ctx, ChallengeRequest{
+	_, err := NewChallengeFactory(challenges, s.random).Create(ctx, ChallengeRequest{
 		Category:   g.Settings.Category,
 		Difficulty: g.Settings.Difficulty,
 	})
@@ -236,10 +237,11 @@ func (s *GameService) checkReadyToStart(ctx context.Context, g *domain.Game) err
 func (s *GameService) mutate(
 	ctx context.Context,
 	ref string,
-	fn func(repo repository.GameRepository, g *domain.Game) error,
+	fn func(repos repository.TxRepositories, g *domain.Game) error,
 ) (*domain.Game, error) {
 	var game *domain.Game
-	err := s.tx.WithinTx(ctx, func(repo repository.GameRepository) error {
+	err := s.tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
+		repo := repos.Games
 		id, err := resolveGameID(ctx, repo, ref)
 		if err != nil {
 			return err
@@ -248,7 +250,7 @@ func (s *GameService) mutate(
 		if err != nil {
 			return err
 		}
-		if err := fn(repo, locked); err != nil {
+		if err := fn(repos, locked); err != nil {
 			return err
 		}
 		game, err = repo.GetByID(ctx, id)

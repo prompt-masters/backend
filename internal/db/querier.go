@@ -31,8 +31,11 @@ type Querier interface {
 	ListChallenges(ctx context.Context, arg ListChallengesParams) ([]*Challenge, error)
 	ListGamePlayers(ctx context.Context, gameID pgtype.UUID) ([]*ListGamePlayersRow, error)
 	ListGamesByStatus(ctx context.Context, arg ListGamesByStatusParams) ([]*ListGamesByStatusRow, error)
-	// Row-locks the game so membership and status changes are serialized.
-	LockGameByID(ctx context.Context, id pgtype.UUID) (*LockGameByIDRow, error)
+	// Row-locks the game so membership and status changes are serialized. Read
+	// the game in a later statement: in READ COMMITTED, anything else computed by
+	// this statement (such as a player count subquery) would use the snapshot from
+	// before the lock wait and miss changes committed by the previous lock holder.
+	LockGameByID(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
 	RemoveGamePlayer(ctx context.Context, arg RemoveGamePlayerParams) (int64, error)
 	RevokeRefreshToken(ctx context.Context, tokenHash string) error
 	RotateRefreshToken(ctx context.Context, arg RotateRefreshTokenParams) (pgtype.UUID, error)

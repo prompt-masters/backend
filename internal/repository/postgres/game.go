@@ -9,32 +9,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prompt-masters/backend/internal/db"
 	"github.com/prompt-masters/backend/internal/domain"
-	"github.com/prompt-masters/backend/internal/repository"
 )
 
 const (
 	pgUniqueViolation     = "23505"
 	gamePlayersPrimaryKey = "game_players_game_id_user_id_key"
 )
-
-// TxBeginner starts transactions; *pgxpool.Pool satisfies it.
-type TxBeginner interface {
-	Begin(ctx context.Context) (pgx.Tx, error)
-}
-
-type GameTransactor struct {
-	pool TxBeginner
-}
-
-func NewGameTransactor(pool TxBeginner) *GameTransactor {
-	return &GameTransactor{pool: pool}
-}
-
-func (t *GameTransactor) WithinTx(ctx context.Context, fn func(games repository.GameRepository) error) error {
-	return pgx.BeginFunc(ctx, t.pool, func(tx pgx.Tx) error {
-		return fn(NewGameRepository(db.New(tx)))
-	})
-}
 
 type GameRepository struct {
 	queries *db.Queries
@@ -89,12 +69,13 @@ func (r *GameRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Gam
 	return r.withPlayers(ctx, toDomainGame(&row.Game, &row.GameSetting, row.PlayerCount))
 }
 
+// LockByID locks first and reads afterwards, so the game it returns reflects
+// every change committed by transactions that held the lock before it.
 func (r *GameRepository) LockByID(ctx context.Context, id uuid.UUID) (*domain.Game, error) {
-	row, err := r.queries.LockGameByID(ctx, pgUUID(id))
-	if err != nil {
+	if _, err := r.queries.LockGameByID(ctx, pgUUID(id)); err != nil {
 		return nil, translateGetError(err)
 	}
-	return r.withPlayers(ctx, toDomainGame(&row.Game, &row.GameSetting, row.PlayerCount))
+	return r.GetByID(ctx, id)
 }
 
 func (r *GameRepository) GetActiveIDByRoomCode(ctx context.Context, roomCode string) (uuid.UUID, error) {
