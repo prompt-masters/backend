@@ -331,18 +331,18 @@ func (q *Queries) UpdateGameSettings(ctx context.Context, arg UpdateGameSettings
 
 const UpdateGameStatus = `-- name: UpdateGameStatus :exec
 UPDATE games
-SET status     = $2,
-    started_at = CASE WHEN $2 = 'in_progress' THEN NOW() ELSE started_at END,
+SET status     = $1::varchar,
+    started_at = CASE WHEN $1::varchar = 'in_progress' THEN NOW() ELSE started_at END,
     updated_at = NOW()
-WHERE id = $1
+WHERE id = $2
 `
 
 type UpdateGameStatusParams struct {
-	ID     pgtype.UUID
 	Status string
+	ID     pgtype.UUID
 }
 
 func (q *Queries) UpdateGameStatus(ctx context.Context, arg UpdateGameStatusParams) error {
-	_, err := q.db.Exec(ctx, UpdateGameStatus, arg.ID, arg.Status)
+	_, err := q.db.Exec(ctx, UpdateGameStatus, arg.Status, arg.ID)
 	return err
 }

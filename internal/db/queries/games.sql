@@ -67,7 +67,7 @@ UPDATE games SET host_id = $2, updated_at = NOW() WHERE id = $1;
 
 -- name: UpdateGameStatus :exec
 UPDATE games
-SET status     = $2,
-    started_at = CASE WHEN $2 = 'in_progress' THEN NOW() ELSE started_at END,
+SET status     = sqlc.arg(status)::varchar,
+    started_at = CASE WHEN sqlc.arg(status)::varchar = 'in_progress' THEN NOW() ELSE started_at END,
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = sqlc.arg(id);
