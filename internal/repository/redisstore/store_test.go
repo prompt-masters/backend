@@ -3,6 +3,7 @@ package redisstore
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -697,5 +698,77 @@ func TestStoreUnavailableRedisReturnsControlledErrors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestStoreOnRedisCluster checks that the multi-key scripts work on a
+// cluster: all of a game's keys, drafts included, share one hash tag and so
+// one slot. Set TEST_REDIS_CLUSTER_ADDRS to a comma-separated node list.
+func TestStoreOnRedisCluster(t *testing.T) {
+	addrs := os.Getenv("TEST_REDIS_CLUSTER_ADDRS")
+	if addrs == "" {
+		t.Skip("TEST_REDIS_CLUSTER_ADDRS is not set; skipping cluster test")
+	}
+	ctx := context.Background()
+	client := redis.NewClusterClient(&redis.ClusterOptions{
+		Addrs:    strings.Split(addrs, ","),
+		Password: os.Getenv("TEST_REDIS_CLUSTER_PASSWORD"),
+	})
+	t.Cleanup(func() { client.Close() })
+	if err := client.Ping(ctx).Err(); err != nil {
+		t.Fatalf("connecting to the cluster: %v", err)
+	}
+
+	prefix := "test-" + uuid.NewString()[:8]
+	store, err := New(client, Options{KeyPrefix: prefix, ActiveTTL: testActiveTTL, EndedTTL: testEndedTTL, OpTimeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two games, so their keys land in different slots.
+	for _, gameID := range []uuid.UUID{uuid.New(), uuid.New()} {
+		a, b := player(uuid.New(), "a", 0), player(uuid.New(), "b", time.Second)
+		if err := store.SetLobby(ctx, lobbyFor(gameID, a.UserID, domain.GameStatusWaiting)); err != nil {
+			t.Fatalf("SetLobby() on the cluster error = %v", err)
+		}
+		for _, p := range []domain.LivePlayer{a, b} {
+			if err := store.AddPlayer(ctx, gameID, p); err != nil {
+				t.Fatalf("AddPlayer() error = %v", err)
+			}
+		}
+		if err := store.SetReady(ctx, gameID, b.UserID); err != nil {
+			t.Fatalf("SetReady() error = %v", err)
+		}
+		if err := store.SaveDraft(ctx, gameID, a.UserID, domain.Draft{Content: "cluster draft", RoundNumber: 1, UpdatedAt: baseTime}); err != nil {
+			t.Fatalf("SaveDraft() error = %v", err)
+		}
+		if _, err := store.IncrementPoints(ctx, gameID, a.UserID, 5); err != nil {
+			t.Fatalf("IncrementPoints() error = %v", err)
+		}
+		if err := store.SetRound(ctx, gameID, domain.RoundState{Number: 1, ChallengeID: uuid.New(), StartedAt: baseTime, Deadline: baseTime.Add(time.Minute)}); err != nil {
+			t.Fatalf("SetRound() error = %v", err)
+		}
+		if err := store.SyncLobby(ctx, lobbyFor(gameID, a.UserID, domain.GameStatusInProgress), []domain.LivePlayer{a, b}); err != nil {
+			t.Fatalf("SyncLobby() error = %v", err)
+		}
+
+		live, err := store.Load(ctx, gameID, a.UserID)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if len(live.Players) != 2 || live.Draft == nil || live.Draft.Content != "cluster draft" || live.Points[a.UserID] != 5 {
+			t.Errorf("cluster live state = %+v", live)
+		}
+
+		gk, _ := store.keys.Game(gameID)
+		draftKey, _ := gk.Draft(a.UserID)
+		for _, k := range append(gk.All(), draftKey) {
+			if ttl := client.PTTL(ctx, k).Val(); ttl <= 0 || ttl > testActiveTTL {
+				t.Errorf("key %s TTL = %s, want within (0, %s]", k, ttl, testActiveTTL)
+			}
+		}
+		if err := store.Delete(ctx, gameID); err != nil {
+			t.Errorf("Delete() error = %v", err)
+		}
 	}
 }
