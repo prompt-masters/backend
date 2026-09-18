@@ -164,6 +164,10 @@ make test          # or: go test -race ./...
 Database tests create a throwaway schema per test and drop it afterwards, so
 they leave the database they connect to untouched.
 
+The hub and WebSocket endpoint tests need no extra setup beyond the database
+and Redis above; they run real clients against `httptest` servers and assert
+with goleak that no goroutine is left behind.
+
 Set `TEST_REDIS_CLUSTER_ADDRS` (comma-separated nodes, optionally with
 `TEST_REDIS_CLUSTER_PASSWORD`) to also run the Redis Cluster test, which
 checks that a game's keys share one slot. It is skipped when unset.
@@ -295,6 +299,75 @@ Every failure has the same shape:
 | 400 | `INVALID_TOKEN` | Verification token missing or unknown |
 | 410 | `TOKEN_EXPIRED` | Verification token older than 24 hours |
 | 500 | `INTERNAL_ERROR` | Anything else; cause is logged, never returned |
+
+## WebSocket
+
+One connection per game carries live play. The hub only transports events:
+services decide what to send and when.
+
+```
+GET /ws/games/{id}?token=<access token>
+```
+
+`{id}` is the game UUID or an active room code, as for the REST routes.
+
+### Connecting
+
+- **Token:** browsers cannot set headers on a WebSocket handshake, so the
+  access token goes in the `token` query parameter. A
+  `Sec-WebSocket-Protocol: bearer, <token>` header is accepted too, and is
+  echoed back as the `bearer` subprotocol.
+- **The handshake is rejected before the upgrade**, as a normal HTTP response:
+  401 without a valid token, 404 for an unknown game, 403 for a user who is not
+  one of its players, 503 when live state is unavailable.
+- **Origin** is checked against same-origin plus `WS_ALLOWED_ORIGINS`.
+  Requests with no `Origin` (native and test clients) are allowed.
+- **On connect** the player receives `game_state`, including their own draft.
+
+### Events
+
+Every message is `{"type": ..., "payload": ...}`.
+
+Server to client: `game_state`, `player_joined`, `player_left`, `player_ready`,
+`player_typing`, `round_start`, `timer_tick`, `output_chunk`,
+`output_complete`, `player_submitted`, `round_end`, `round_results`,
+`game_end`, `error`.
+
+Client to server: `player_ready`, `prompt_typing`, `heartbeat` (handled now),
+`prompt_test` and `submit_prompt` (answered with an `unsupported_event` error
+until the round and submission services land).
+
+Rules:
+
+- Broadcasts reach only the room of the game they belong to.
+- `error`, `output_chunk`, `output_complete` and a player's own draft are sent
+  to that one player, never broadcast. `player_submitted` never carries prompt
+  text, so judging stays blind.
+- All timing (`round_start`, `timer_tick`, deadlines) comes from the server's
+  Redis state; the client never sets it.
+
+### Behaviour
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `WS_PING_INTERVAL` | `30s` | Server ping interval |
+| `WS_PONG_WAIT` | `60s` | Silence allowed before a connection is closed; must exceed the ping interval |
+| `WS_WRITE_WAIT` | `10s` | Deadline for one socket write |
+| `WS_SEND_BUFFER` | `64` | Outbound queue per connection |
+| `WS_MAX_MESSAGE_BYTES` | `16384` | Largest accepted client message |
+| `WS_MAX_CONNECTIONS_PER_USER` | `3` | Sockets one user may hold in a room |
+| `WS_ALLOWED_ORIGINS` | empty | Extra browser origins allowed |
+
+- **Slow clients are disconnected, not served stale.** When a connection's send
+  buffer fills, it is closed and logged; game state is sequential, so dropping
+  events would leave that player silently wrong. Reconnecting gives them a
+  fresh `game_state`. A slow client never blocks its room.
+- **Several connections per user are allowed** (two tabs, or a reconnect racing
+  an old socket) up to `WS_MAX_CONNECTIONS_PER_USER`; beyond that the oldest is
+  closed. All of a user's connections receive their targeted events.
+- **Dead connections** are detected by ping/pong and cleaned up; each connection
+  has exactly one reader and one writer goroutine, and both exit on disconnect.
+  `Shutdown` closes every socket and waits for those goroutines.
 
 ## Redis (live game state)
 
