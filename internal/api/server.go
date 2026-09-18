@@ -15,6 +15,7 @@ type Server struct {
 	games      *handler.GameHandler
 	health     *handler.HealthHandler
 	liveState  *handler.LiveStateHandler
+	websocket  *handler.WebSocketHandler
 	logger     *log.Logger
 	jwtSecret  string
 }
@@ -24,6 +25,7 @@ func NewServer(
 	challengeService *service.ChallengeService,
 	gameService *service.GameService,
 	liveStateService *service.LiveStateService,
+	websocketHandler *handler.WebSocketHandler,
 	healthChecks []handler.HealthCheck,
 	logger *log.Logger,
 	jwtSecret string,
@@ -34,6 +36,7 @@ func NewServer(
 		games:      handler.NewGameHandler(gameService, logger),
 		health:     handler.NewHealthHandler(healthChecks, logger),
 		liveState:  handler.NewLiveStateHandler(liveStateService, logger),
+		websocket:  websocketHandler,
 		logger:     logger,
 		jwtSecret:  jwtSecret,
 	}
@@ -44,6 +47,9 @@ func (s *Server) Routes() http.Handler {
 
 	// Public
 	mux.HandleFunc("GET /health", s.health.Health)
+	// The WebSocket handshake carries its token in the query string or
+	// subprotocol, so it authenticates itself rather than using RequireAuth.
+	mux.HandleFunc("GET /ws/games/{id}", s.websocket.Connect)
 	mux.HandleFunc("POST /api/v1/auth/register", s.auth.Register)
 	mux.HandleFunc("POST /api/v1/auth/login", s.auth.Login)
 	mux.HandleFunc("POST /api/v1/auth/refresh", s.auth.Refresh)

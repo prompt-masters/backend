@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/prompt-masters/backend/internal/mail"
 	"github.com/prompt-masters/backend/internal/redisclient"
+	"github.com/prompt-masters/backend/internal/ws"
 )
 
 const (
@@ -38,10 +40,21 @@ type Config struct {
 	AppBaseURL      string
 	Mail            mail.Config
 	Redis           redisclient.Config
+	WS              WSConfig
+}
+
+// WSConfig configures the WebSocket hub and which browser origins may open a
+// connection.
+type WSConfig struct {
+	Hub ws.Config
+	// AllowedOrigins are extra origins accepted besides same-origin requests.
+	AllowedOrigins []string
 }
 
 func Load() (*Config, error) {
 	_ = godotenv.Load()
+
+	hubDefaults := ws.DefaultConfig()
 
 	cfg := &Config{
 		Host:        os.Getenv("HOST"),
@@ -72,6 +85,17 @@ func Load() (*Config, error) {
 			KeyPrefix:     envString("REDIS_KEY_PREFIX", defaultRedisKeyPrefix),
 			ActiveGameTTL: envDuration("GAME_STATE_ACTIVE_TTL", defaultActiveGameTTL),
 			EndedGameTTL:  envDuration("GAME_STATE_ENDED_TTL", defaultEndedGameTTL),
+		},
+		WS: WSConfig{
+			Hub: ws.Config{
+				PingInterval:          envDuration("WS_PING_INTERVAL", hubDefaults.PingInterval),
+				PongWait:              envDuration("WS_PONG_WAIT", hubDefaults.PongWait),
+				WriteWait:             envDuration("WS_WRITE_WAIT", hubDefaults.WriteWait),
+				SendBuffer:            envInt("WS_SEND_BUFFER", hubDefaults.SendBuffer),
+				MaxMessageBytes:       int64(envInt("WS_MAX_MESSAGE_BYTES", int(hubDefaults.MaxMessageBytes))),
+				MaxConnectionsPerUser: envInt("WS_MAX_CONNECTIONS_PER_USER", hubDefaults.MaxConnectionsPerUser),
+			},
+			AllowedOrigins: envList("WS_ALLOWED_ORIGINS"),
 		},
 	}
 
@@ -104,6 +128,9 @@ func Load() (*Config, error) {
 	}
 	if err := cfg.Redis.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid Redis config: %w", err)
+	}
+	if err := cfg.WS.Hub.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid WebSocket config: %w", err)
 	}
 
 	return cfg, nil
@@ -139,4 +166,15 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return v
+}
+
+// envList reads a comma-separated list, ignoring blank entries.
+func envList(key string) []string {
+	var out []string
+	for _, item := range strings.Split(os.Getenv(key), ",") {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }

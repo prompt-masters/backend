@@ -21,6 +21,7 @@ import (
 	"github.com/prompt-masters/backend/internal/repository/postgres"
 	"github.com/prompt-masters/backend/internal/repository/redisstore"
 	"github.com/prompt-masters/backend/internal/service"
+	"github.com/prompt-masters/backend/internal/ws"
 )
 
 const shutdownTimeout = 15 * time.Second
@@ -88,13 +89,23 @@ func run(logger *log.Logger) error {
 		return err
 	}
 	liveStateService := service.NewLiveStateService(gameStateStore, transactor, logger, time.Now)
-	gameService := service.NewGameService(transactor, service.MathRandom{}, liveStateService)
+
+	hub, err := ws.NewHub(cfg.WS.Hub, nil, logger)
+	if err != nil {
+		return err
+	}
+	// The router needs the hub to broadcast, and the hub needs the router to
+	// deliver client messages, so it is attached once both exist.
+	hub.SetRouter(service.NewWSRouter(liveStateService, hub, logger))
+	gameEvents := service.NewGameEvents(hub, logger)
+	gameService := service.NewGameService(transactor, service.MathRandom{}, liveStateService, gameEvents)
+	websocketHandler := handler.NewWebSocketHandler(hub, liveStateService, cfg.JWTSecret, cfg.WS.AllowedOrigins, logger)
 
 	healthChecks := []handler.HealthCheck{
 		{Name: "postgres", Critical: true, Check: pool.Ping},
 		{Name: "redis", Check: func(ctx context.Context) error { return redisClient.Ping(ctx).Err() }},
 	}
-	server := api.NewServer(authService, challengeService, gameService, liveStateService, healthChecks, logger, cfg.JWTSecret)
+	server := api.NewServer(authService, challengeService, gameService, liveStateService, websocketHandler, healthChecks, logger, cfg.JWTSecret)
 
 	s := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),
@@ -122,5 +133,10 @@ func run(logger *log.Logger) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	return s.Shutdown(shutdownCtx)
+	// Stop accepting requests first, then close the live sockets.
+	err = s.Shutdown(shutdownCtx)
+	if hubErr := hub.Shutdown(shutdownCtx); hubErr != nil {
+		logger.Printf("ws op=shutdown error=%q", hubErr)
+	}
+	return err
 }

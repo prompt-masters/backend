@@ -225,10 +225,59 @@ func (r *recordingSyncer) synced() []*domain.Game {
 	return slices.Clone(r.games)
 }
 
+// recordingEvents captures what GameService publishes to the room.
+type recordingEvents struct {
+	mu        sync.Mutex
+	published []publishedEvent
+}
+
+type publishedEvent struct {
+	kind        string
+	gameID      uuid.UUID
+	userID      uuid.UUID
+	username    string
+	hostChanged bool
+	status      domain.GameStatus
+	playerCount int
+}
+
+func (r *recordingEvents) record(e publishedEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.published = append(r.published, e)
+}
+
+func (r *recordingEvents) PlayerJoined(_ context.Context, game *domain.Game, userID uuid.UUID) {
+	r.record(publishedEvent{kind: "player_joined", gameID: game.ID, userID: userID, status: game.Status, playerCount: game.PlayerCount})
+}
+
+func (r *recordingEvents) PlayerLeft(_ context.Context, game *domain.Game, userID uuid.UUID, username string, hostChanged bool) {
+	r.record(publishedEvent{kind: "player_left", gameID: game.ID, userID: userID, username: username, hostChanged: hostChanged, status: game.Status, playerCount: game.PlayerCount})
+}
+
+func (r *recordingEvents) GameUpdated(_ context.Context, game *domain.Game) {
+	r.record(publishedEvent{kind: "game_state", gameID: game.ID, status: game.Status, playerCount: game.PlayerCount})
+}
+
+func (r *recordingEvents) events() []publishedEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.published)
+}
+
+func (r *recordingEvents) kinds() []string {
+	kinds := []string{}
+	for _, e := range r.events() {
+		kinds = append(kinds, e.kind)
+	}
+	return kinds
+}
+
 type gameServiceFixture struct {
 	store  *fakeGameStore
 	random *sequenceRandom
 	live   *recordingSyncer
+	events *recordingEvents
 	svc    *GameService
 }
 
@@ -237,8 +286,9 @@ func newGameServiceFixture() *gameServiceFixture {
 		store:  newFakeGameStore(),
 		random: &sequenceRandom{values: []int{482913}},
 		live:   &recordingSyncer{},
+		events: &recordingEvents{},
 	}
-	f.svc = NewGameService(f.store, f.random, f.live)
+	f.svc = NewGameService(f.store, f.random, f.live, f.events)
 	return f
 }
 
@@ -869,6 +919,96 @@ func TestGameServiceMirrorsCommittedChangesIntoLiveState(t *testing.T) {
 		}
 		if n := len(f.live.synced()); n != 0 {
 			t.Errorf("synced %d games after failures, want 0", n)
+		}
+	})
+}
+
+func TestGameServicePublishesLobbyEvents(t *testing.T) {
+	host, guest := uuid.New(), uuid.New()
+	ctx := context.Background()
+
+	t.Run("create announces the new game", func(t *testing.T) {
+		f := newGameServiceFixture()
+		if _, err := f.svc.Create(ctx, host, validSettingsInput); err != nil {
+			t.Fatal(err)
+		}
+		if kinds := f.events.kinds(); !slices.Equal(kinds, []string{"game_state"}) {
+			t.Errorf("published %v, want one game_state", kinds)
+		}
+	})
+
+	t.Run("join announces the player", func(t *testing.T) {
+		f := newGameServiceFixture()
+		g := f.store.seed(domain.GameStatusWaiting, "551100", validSettings, host)
+		if _, err := f.svc.Join(ctx, guest, g.ID.String()); err != nil {
+			t.Fatal(err)
+		}
+		events := f.events.events()
+		if len(events) != 1 || events[0].kind != "player_joined" || events[0].userID != guest || events[0].playerCount != 2 {
+			t.Errorf("published %+v, want player_joined for the guest", events)
+		}
+	})
+
+	t.Run("leave names the player and the new host", func(t *testing.T) {
+		f := newGameServiceFixture()
+		f.store.usernames[host] = "host"
+		g := f.store.seed(domain.GameStatusWaiting, "551101", validSettings, host, guest)
+		if err := f.svc.Leave(ctx, host, g.ID.String()); err != nil {
+			t.Fatal(err)
+		}
+		events := f.events.events()
+		if len(events) != 1 || events[0].kind != "player_left" || events[0].userID != host {
+			t.Fatalf("published %+v, want player_left for the host", events)
+		}
+		if events[0].username != "host" || !events[0].hostChanged {
+			t.Errorf("player_left = %+v, want the username and a host change", events[0])
+		}
+	})
+
+	t.Run("a player leaving without a host change", func(t *testing.T) {
+		f := newGameServiceFixture()
+		g := f.store.seed(domain.GameStatusWaiting, "551102", validSettings, host, guest)
+		if err := f.svc.Leave(ctx, guest, g.ID.String()); err != nil {
+			t.Fatal(err)
+		}
+		if e := f.events.events()[0]; e.hostChanged {
+			t.Errorf("player_left = %+v, want no host change", e)
+		}
+	})
+
+	t.Run("settings, start and cancel announce the new state", func(t *testing.T) {
+		f := newGameServiceFixture()
+		g := f.store.seed(domain.GameStatusWaiting, "551103", validSettings, host, guest)
+		if _, err := f.svc.UpdateSettings(ctx, host, g.ID.String(), validSettingsInput); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.svc.Start(ctx, host, g.ID.String()); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.svc.Cancel(ctx, host, g.ID.String()); err != nil {
+			t.Fatal(err)
+		}
+
+		events := f.events.events()
+		if kinds := f.events.kinds(); !slices.Equal(kinds, []string{"game_state", "game_state", "game_state"}) {
+			t.Fatalf("published %v, want three game_state events", kinds)
+		}
+		if events[1].status != domain.GameStatusInProgress || events[2].status != domain.GameStatusCancelled {
+			t.Errorf("published statuses = %s, %s; want in_progress then cancelled", events[1].status, events[2].status)
+		}
+	})
+
+	t.Run("nothing is published when a change fails", func(t *testing.T) {
+		f := newGameServiceFixture()
+		g := f.store.seed(domain.GameStatusWaiting, "551104", validSettings, host)
+		if _, err := f.svc.Join(ctx, host, g.ID.String()); !errors.Is(err, domain.ErrAlreadyJoined) {
+			t.Fatalf("Join() error = %v, want ErrAlreadyJoined", err)
+		}
+		if _, err := f.svc.Start(ctx, guest, g.ID.String()); !errors.Is(err, domain.ErrNotGameHost) {
+			t.Fatalf("Start() error = %v, want ErrNotGameHost", err)
+		}
+		if kinds := f.events.kinds(); len(kinds) != 0 {
+			t.Errorf("published %v after failures, want none", kinds)
 		}
 	})
 }

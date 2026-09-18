@@ -94,6 +94,15 @@ func NewHub(cfg Config, router Router, logger *log.Logger) (*Hub, error) {
 	return &Hub{cfg: cfg, router: router, logger: logger, rooms: map[uuid.UUID]*room{}}, nil
 }
 
+// SetRouter attaches the handler for client messages. It exists because the
+// router needs the hub to broadcast, so one of the two has to be wired after
+// construction. Call it during start-up, before any connection is added.
+func (h *Hub) SetRouter(router Router) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.router = router
+}
+
 // Add registers an upgraded socket into the game's room and starts its pumps.
 // The room is created on the first connection.
 func (h *Hub) Add(ctx context.Context, gameID, userID uuid.UUID, username string, socket *websocket.Conn) (*Connection, error) {
@@ -227,6 +236,12 @@ func (h *Hub) Connections(gameID uuid.UUID) int {
 		return 0
 	}
 	return r.size()
+}
+
+func (h *Hub) currentRouter() Router {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.router
 }
 
 func (h *Hub) room(gameID uuid.UUID) *room {
@@ -470,12 +485,13 @@ func (c *Connection) handle(ctx context.Context, data []byte) {
 		// Reading it already extended the deadline.
 		return
 	}
-	if c.hub.router == nil {
+	router := c.hub.currentRouter()
+	if router == nil {
 		c.sendError(CodeUnsupportedEvent, fmt.Sprintf("Event %q is not supported yet.", env.Type))
 		return
 	}
 
-	c.hub.router.Route(ctx, Inbound{
+	router.Route(ctx, Inbound{
 		GameID:   c.gameID,
 		UserID:   c.userID,
 		Username: c.username,
