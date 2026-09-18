@@ -58,7 +58,10 @@ services:
       HOST: 0.0.0.0
       PORT: "8080"
       DATABASE_URL: postgres://postgres:password@postgres:5432/prompters_db?sslmode=disable
+      # Inside the compose network Redis is reachable as "redis"; the password
+      # is the same one the redis service is started with.
       REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
       APP_BASE_URL: http://localhost:${APP_PORT:-8080}
     ports:
       - "${APP_PORT:-8080}:8080"
