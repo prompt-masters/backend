@@ -58,41 +58,69 @@ backend/
 - **argon2id** — password hashing
 - **google/uuid** — UUID generation
 
-## Run with Docker
+## Setup
 
-Brings up Postgres, Redis, applies migrations, and starts the API. No Go
-toolchain needed.
+**Requirements:** Docker and Docker Compose. Go 1.26.5+ only if you want to
+run the API or the tests outside a container.
+
+### 1. Environment
 
 ```sh
-cp .env.example .env   # then set REDIS_PASSWORD
-make up
+cp .env.example .env
+```
+
+Then edit `.env`:
+
+| Variable | Why |
+| --- | --- |
+| `REDIS_PASSWORD` | **Required.** Docker Compose refuses to start Redis without it, and the API container uses the same value. Pick anything for local dev. |
+| `JWT_SECRET` | Signs access tokens. Change it from the example value. |
+| `APP_PORT`, `POSTGRES_PORT`, `REDIS_PORT` | Change only if 8080, 5432 or 6379 are already taken on your machine. |
+| `TEST_DATABASE_URL`, `TEST_REDIS_*` | Needed to run the tests; see [Tests](#tests). |
+
+### 2. Everything in Docker
+
+```sh
+make up            # postgres + redis + the API
+make migrate-up    # create the schema (goose)
+make seed          # load dev challenges, safe to re-run
 make logs
 ```
 
-The API is on `http://localhost:8080`. If 8080 or 5432 are already taken on
-your machine, set `APP_PORT` and `POSTGRES_PORT` in `.env`.
+The API is then on `http://localhost:${APP_PORT:-8080}`; check
+`curl localhost:8080/health`. `make down` stops everything.
 
-`make down` stops everything.
-
-## Getting Started (without Docker)
-
-**Requirements:** Go 1.26.5+, Docker, Docker Compose
+### 3. Or run the API locally against containers
 
 ```sh
-# 1. Setup environment
-cp .env.example .env
-
-# 2. Start postgres
-make up
-
-# 3. Run migrations
+docker compose up -d postgres redis
 make migrate-up
-
-# 4. Load dev challenges (optional, safe to re-run)
 make seed
-
-# 5. Start server
 make run
+```
+
+`make migrate-up` and `make seed` use `DATABASE_URL` from `.env`, which points
+at the published Postgres port, so they work either way.
+
+**Requirements for this path:** Go 1.26.5+, plus
+[goose](https://github.com/pressly/goose) for `make migrate-up`. Without
+goose installed:
+
+```sh
+go run github.com/pressly/goose/v3/cmd/goose@latest \
+  -dir internal/db/migrations postgres "$DATABASE_URL" up
+```
+
+### Resetting a database created before migrations existed
+
+If `make migrate-up` fails with `relation "users" already exists`, the
+database predates goose. Recreate it (this deletes its data):
+
+```sh
+# local postgres
+dropdb prompters_db && createdb prompters_db
+# or the compose volume
+make down && docker volume rm backend_postgres_data && make up
 ```
 
 ## Make Commands
@@ -129,8 +157,16 @@ its keys afterwards; they are skipped when `TEST_REDIS_ADDR` is unset.
 
 ```sh
 docker compose up -d postgres redis
-go test -race ./...
+make test          # or: go test -race ./...
 ```
+
+`make test` exports `.env`, so the `TEST_*` variables set there are picked up.
+Database tests create a throwaway schema per test and drop it afterwards, so
+they leave the database they connect to untouched.
+
+Set `TEST_REDIS_CLUSTER_ADDRS` (comma-separated nodes, optionally with
+`TEST_REDIS_CLUSTER_PASSWORD`) to also run the Redis Cluster test, which
+checks that a game's keys share one slot. It is skipped when unset.
 
 Repository tests run against `TEST_DATABASE_URL`. Each test migrates a
 throwaway schema and drops it afterwards, so existing tables are untouched.
@@ -280,7 +316,9 @@ in it can be lost or rebuilt.
 | `REDIS_ADDR` | `localhost:6379` | Host and port |
 | `REDIS_USERNAME` / `REDIS_PASSWORD` | empty | ACL credentials |
 | `REDIS_DB` | `0` | Database index |
-| `REDIS_TLS` | `false` | TLS (1.2+, system roots) |
+| `REDIS_TLS` | `false` | TLS (1.2+, verified against the system roots) |
+| `REDIS_TLS_CA_FILE` | empty | PEM bundle to verify the server against instead of the system roots (private CA) |
+| `REDIS_TLS_SERVER_NAME` | empty | Overrides the name checked against the server certificate |
 | `REDIS_POOL_SIZE` | `20` | Connection pool size |
 | `REDIS_DIAL_TIMEOUT` / `REDIS_READ_TIMEOUT` / `REDIS_WRITE_TIMEOUT` | `2s` / `1s` / `1s` | Socket timeouts |
 | `REDIS_OP_TIMEOUT` | `2s` | Upper bound for each live-state operation |
