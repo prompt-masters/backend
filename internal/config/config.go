@@ -62,6 +62,8 @@ func Load() (*Config, error) {
 			Password:      os.Getenv("REDIS_PASSWORD"),
 			DB:            envInt("REDIS_DB", 0),
 			TLS:           envBool("REDIS_TLS", false),
+			TLSCAFile:     os.Getenv("REDIS_TLS_CA_FILE"),
+			TLSServerName: os.Getenv("REDIS_TLS_SERVER_NAME"),
 			PoolSize:      envInt("REDIS_POOL_SIZE", defaultRedisPoolSize),
 			DialTimeout:   envDuration("REDIS_DIAL_TIMEOUT", defaultRedisDialTimeout),
 			ReadTimeout:   envDuration("REDIS_READ_TIMEOUT", defaultRedisReadTimeout),

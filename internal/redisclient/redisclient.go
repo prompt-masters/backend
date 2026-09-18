@@ -6,8 +6,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"time"
+
+	"crypto/x509"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -19,12 +22,19 @@ type Config struct {
 	Username string
 	Password string
 	DB       int
-	// TLS enables TLS with the system root CAs and a minimum of TLS 1.2.
-	TLS          bool
-	PoolSize     int
-	DialTimeout  time.Duration
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
+	// TLS enables TLS with a minimum version of 1.2, verifying the server
+	// against the system root CAs.
+	TLS bool
+	// TLSCAFile is an optional PEM bundle to verify the server against
+	// instead of the system roots, for a private CA.
+	TLSCAFile string
+	// TLSServerName overrides the name checked against the server
+	// certificate; it defaults to the host in Addr.
+	TLSServerName string
+	PoolSize      int
+	DialTimeout   time.Duration
+	ReadTimeout   time.Duration
+	WriteTimeout  time.Duration
 	// OpTimeout bounds every live-state operation, including its round trips.
 	OpTimeout time.Duration
 	// KeyPrefix namespaces every key, e.g. "promptgame".
@@ -66,8 +76,9 @@ func (c Config) Validate() error {
 }
 
 // New creates a client. It does not connect; connections are opened lazily
-// and re-established automatically after Redis becomes reachable again.
-func New(cfg Config) *redis.Client {
+// and re-established automatically after Redis becomes reachable again. It
+// fails only when TLS is on and the CA file cannot be loaded.
+func New(cfg Config) (*redis.Client, error) {
 	opts := &redis.Options{
 		Addr:         cfg.Addr,
 		Username:     cfg.Username,
@@ -81,9 +92,21 @@ func New(cfg Config) *redis.Client {
 		ContextTimeoutEnabled: true,
 	}
 	if cfg.TLS {
-		opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: cfg.TLSServerName}
+		if cfg.TLSCAFile != "" {
+			pool := x509.NewCertPool()
+			pem, err := os.ReadFile(cfg.TLSCAFile)
+			if err != nil {
+				return nil, fmt.Errorf("reading REDIS_TLS_CA_FILE: %w", err)
+			}
+			if !pool.AppendCertsFromPEM(pem) {
+				return nil, fmt.Errorf("REDIS_TLS_CA_FILE %s contains no certificate", cfg.TLSCAFile)
+			}
+			tlsCfg.RootCAs = pool
+		}
+		opts.TLSConfig = tlsCfg
 	}
-	return redis.NewClient(opts)
+	return redis.NewClient(opts), nil
 }
 
 // Ping checks connectivity within timeout.

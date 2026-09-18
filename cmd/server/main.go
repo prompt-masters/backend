@@ -53,7 +53,10 @@ func run(logger *log.Logger) error {
 
 	// Redis only holds live game state, so the API starts without it: live
 	// state endpoints answer 503 until the client reconnects on its own.
-	redisClient := redisclient.New(cfg.Redis)
+	redisClient, err := redisclient.New(cfg.Redis)
+	if err != nil {
+		return err
+	}
 	defer func() {
 		if err := redisClient.Close(); err != nil {
 			logger.Printf("closing redis client: %v", err)

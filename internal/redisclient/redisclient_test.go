@@ -2,6 +2,16 @@ package redisclient
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,28 +67,105 @@ func TestConfigValidate(t *testing.T) {
 
 func TestNewAppliesTLSOnlyWhenEnabled(t *testing.T) {
 	cfg := validConfig()
-	plain := New(cfg)
+	plain, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer plain.Close()
 	if plain.Options().TLSConfig != nil {
 		t.Error("TLS configured although REDIS_TLS is off")
 	}
 
 	cfg.TLS = true
-	secure := New(cfg)
-	defer secure.Close()
-	if secure.Options().TLSConfig == nil {
-		t.Error("TLS not configured although REDIS_TLS is on")
+	secure, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
+	defer secure.Close()
+	tlsCfg := secure.Options().TLSConfig
+	if tlsCfg == nil || tlsCfg.MinVersion != tls.VersionTLS12 {
+		t.Errorf("TLS config = %+v, want TLS 1.2 or later", tlsCfg)
+	}
+	if tlsCfg.InsecureSkipVerify {
+		t.Error("certificate verification is disabled")
+	}
+	if tlsCfg.RootCAs != nil {
+		t.Error("RootCAs set without REDIS_TLS_CA_FILE; want the system roots")
+	}
+}
+
+func TestNewWithCustomCA(t *testing.T) {
+	caPEM, _ := selfSignedCA(t)
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := validConfig()
+	cfg.TLS = true
+	cfg.TLSCAFile = caFile
+	cfg.TLSServerName = "redis.internal"
+
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer client.Close()
+	tlsCfg := client.Options().TLSConfig
+	if tlsCfg.RootCAs == nil {
+		t.Error("RootCAs not loaded from REDIS_TLS_CA_FILE")
+	}
+	if tlsCfg.ServerName != "redis.internal" {
+		t.Errorf("ServerName = %q, want the configured override", tlsCfg.ServerName)
+	}
+
+	badFile := filepath.Join(dir, "bad.pem")
+	if err := os.WriteFile(badFile, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"missing file": filepath.Join(dir, "nope.pem"), "not a certificate": badFile} {
+		cfg.TLSCAFile = path
+		if _, err := New(cfg); err == nil {
+			t.Errorf("New() with a %s error = nil, want a failure", name)
+		}
+	}
+}
+
+// selfSignedCA returns a PEM certificate and its key.
+func selfSignedCA(t *testing.T) ([]byte, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), key
 }
 
 func TestPingUnreachableRedisReturnsErrorWithinTimeout(t *testing.T) {
 	cfg := validConfig()
 	cfg.Addr = "127.0.0.1:1" // nothing listens here
-	client := New(cfg)
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer client.Close()
 
 	start := time.Now()
-	err := Ping(context.Background(), client, 500*time.Millisecond)
+	err = Ping(context.Background(), client, 500*time.Millisecond)
 	if err == nil {
 		t.Fatal("Ping() = nil, want an error for an unreachable server")
 	}
