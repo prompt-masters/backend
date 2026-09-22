@@ -20,6 +20,14 @@ const (
 	gameListLimit       = 100
 )
 
+// GameEventPublisher announces lobby changes to the game's room. It is best
+// effort: publishing never fails a change that is already committed.
+type GameEventPublisher interface {
+	PlayerJoined(ctx context.Context, game *domain.Game, userID uuid.UUID)
+	PlayerLeft(ctx context.Context, game *domain.Game, userID uuid.UUID, username string, hostChanged bool)
+	GameUpdated(ctx context.Context, game *domain.Game)
+}
+
 type GameSettingsInput struct {
 	Rounds       int
 	TimePerRound int
@@ -43,12 +51,13 @@ type GameService struct {
 	tx     repository.Transactor
 	random Random
 	live   LiveStateSyncer
+	events GameEventPublisher
 }
 
 // NewGameService uses random for room codes and for the ChallengeFactory that
 // checks a game can start.
-func NewGameService(tx repository.Transactor, random Random, live LiveStateSyncer) *GameService {
-	return &GameService{tx: tx, random: random, live: live}
+func NewGameService(tx repository.Transactor, random Random, live LiveStateSyncer, events GameEventPublisher) *GameService {
+	return &GameService{tx: tx, random: random, live: live, events: events}
 }
 
 // List returns up to gameListLimit games in the given status, newest first.
@@ -101,6 +110,7 @@ func (s *GameService) Create(ctx context.Context, hostID uuid.UUID, in GameSetti
 		return nil, err
 	}
 	s.live.SyncGame(ctx, game)
+	s.events.GameUpdated(ctx, game)
 	return game, nil
 }
 
@@ -127,7 +137,7 @@ func (s *GameService) UpdateSettings(ctx context.Context, userID uuid.UUID, ref 
 		return nil, err
 	}
 
-	return s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
+	game, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if !g.IsHost(userID) {
 			return domain.ErrNotGameHost
 		}
@@ -141,11 +151,16 @@ func (s *GameService) UpdateSettings(ctx context.Context, userID uuid.UUID, ref 
 		}
 		return repos.Games.UpdateSettings(ctx, g.ID, settings)
 	})
+	if err != nil {
+		return nil, err
+	}
+	s.events.GameUpdated(ctx, game)
+	return game, nil
 }
 
 // Join adds userID to a waiting game that has room for another player.
 func (s *GameService) Join(ctx context.Context, userID uuid.UUID, ref string) (*domain.Game, error) {
-	return s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
+	game, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if g.Status != domain.GameStatusWaiting {
 			return domain.ErrGameNotWaiting
 		}
@@ -157,15 +172,31 @@ func (s *GameService) Join(ctx context.Context, userID uuid.UUID, ref string) (*
 		}
 		return repos.Games.AddPlayer(ctx, g.ID, userID)
 	})
+	if err != nil {
+		return nil, err
+	}
+	s.events.PlayerJoined(ctx, game, userID)
+	return game, nil
 }
 
 // Leave removes userID from a waiting game. When the host leaves, hosting
 // passes to the player who joined earliest; when no players remain the game
 // is cancelled.
 func (s *GameService) Leave(ctx context.Context, userID uuid.UUID, ref string) error {
-	_, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
+	var (
+		username     string
+		previousHost uuid.UUID
+	)
+	game, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if !g.HasPlayer(userID) {
 			return domain.ErrNotInGame
+		}
+		previousHost = g.HostID
+		for _, p := range g.Players {
+			if p.UserID == userID {
+				username = p.Username
+				break
+			}
 		}
 		if g.Status != domain.GameStatusWaiting {
 			return domain.ErrGameNotWaiting
@@ -186,13 +217,17 @@ func (s *GameService) Leave(ctx context.Context, userID uuid.UUID, ref string) e
 		}
 		return repos.Games.UpdateStatus(ctx, g.ID, domain.GameStatusCancelled)
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	s.events.PlayerLeft(ctx, game, userID, username, game.HostID != previousHost)
+	return nil
 }
 
 // Start moves a waiting game to in_progress once the host asks and the game
 // is ready: see checkReadyToStart.
 func (s *GameService) Start(ctx context.Context, userID uuid.UUID, ref string) (*domain.Game, error) {
-	return s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
+	game, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if !g.IsHost(userID) {
 			return domain.ErrNotGameHost
 		}
@@ -204,12 +239,17 @@ func (s *GameService) Start(ctx context.Context, userID uuid.UUID, ref string) (
 		}
 		return repos.Games.UpdateStatus(ctx, g.ID, domain.GameStatusInProgress)
 	})
+	if err != nil {
+		return nil, err
+	}
+	s.events.GameUpdated(ctx, game)
+	return game, nil
 }
 
 // Cancel ends a waiting or in-progress game. Only the host may cancel; the
 // game is kept with status cancelled rather than deleted.
 func (s *GameService) Cancel(ctx context.Context, userID uuid.UUID, ref string) error {
-	_, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
+	game, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
 		if !g.IsHost(userID) {
 			return domain.ErrNotGameHost
 		}
@@ -218,7 +258,11 @@ func (s *GameService) Cancel(ctx context.Context, userID uuid.UUID, ref string) 
 		}
 		return repos.Games.UpdateStatus(ctx, g.ID, domain.GameStatusCancelled)
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	s.events.GameUpdated(ctx, game)
+	return nil
 }
 
 // checkReadyToStart defines when a game may start:

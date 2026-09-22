@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prompt-masters/backend/internal/api"
+	"github.com/prompt-masters/backend/internal/api/handler"
 	"github.com/prompt-masters/backend/internal/config"
 	"github.com/prompt-masters/backend/internal/db"
 	"github.com/prompt-masters/backend/internal/domain"
@@ -24,6 +25,7 @@ import (
 	"github.com/prompt-masters/backend/internal/service"
 	"github.com/prompt-masters/backend/internal/testutil/pgtest"
 	"github.com/prompt-masters/backend/internal/util"
+	"github.com/prompt-masters/backend/internal/ws"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -39,6 +41,7 @@ type testAPI struct {
 	// live and logs are set when the API is built with Redis.
 	live *service.LiveStateService
 	logs *syncBuffer
+	hub  *ws.Hub
 }
 
 // newTestAPI builds the API without live state: lobby changes are not
@@ -85,6 +88,18 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 	challengeService := service.NewChallengeService(challengeRepo)
 	transactor := postgres.NewTransactor(pool)
 
+	hub, err := ws.NewHub(testHubConfig(), nil, logger)
+	if err != nil {
+		t.Fatalf("creating hub: %v", err)
+	}
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := hub.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("hub shutdown: %v", err)
+		}
+	})
+
 	var (
 		live   *service.LiveStateService
 		syncer service.LiveStateSyncer = noopSyncer{}
@@ -101,12 +116,27 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 		}
 		live = service.NewLiveStateService(store, transactor, logger, time.Now)
 		syncer = live
+		hub.SetRouter(service.NewWSRouter(live, hub, logger))
 	}
-	gameService := service.NewGameService(transactor, service.MathRandom{}, syncer)
+	gameService := service.NewGameService(transactor, service.MathRandom{}, syncer, service.NewGameEvents(hub, logger))
+	websocketHandler := handler.NewWebSocketHandler(hub, live, jwtSecret, []string{"https://app.example.com"}, logger)
 
-	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, nil, logger, jwtSecret).Routes())
+	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, websocketHandler, nil, logger, jwtSecret).Routes())
 	t.Cleanup(server.Close)
-	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs}
+	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs, hub: hub}
+}
+
+// testHubConfig keeps deadlines generous: test clients idle between
+// assertions and only answer pings while reading.
+func testHubConfig() ws.Config {
+	cfg := ws.DefaultConfig()
+	cfg.PingInterval = 2 * time.Second
+	cfg.PongWait = 30 * time.Second
+	// Small buffer and a short write deadline so back pressure shows up
+	// quickly in tests.
+	cfg.SendBuffer = 8
+	cfg.WriteWait = 500 * time.Millisecond
+	return cfg
 }
 
 // syncBuffer is a log destination safe to read while handlers write to it.
