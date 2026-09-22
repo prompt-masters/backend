@@ -3,77 +3,18 @@ package postgres
 import (
 	"context"
 	"errors"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 	"github.com/prompt-masters/backend/internal/db"
 	"github.com/prompt-masters/backend/internal/domain"
+	"github.com/prompt-masters/backend/internal/testutil/pgtest"
 )
 
-// newTestQueries migrates a fresh, uniquely named schema in TEST_DATABASE_URL
-// and returns queries bound to it. The schema is dropped when the test ends,
-// so tests never touch existing tables and can run against a shared database.
 func newTestQueries(t *testing.T) *db.Queries {
-	t.Helper()
-
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL is not set; skipping repository test")
-	}
-	ctx := context.Background()
-
-	admin, err := pgx.Connect(ctx, url)
-	if err != nil {
-		t.Fatalf("connecting to test database: %v", err)
-	}
-	defer admin.Close(ctx)
-
-	schema := "test_" + uuid.NewString()[:8]
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
-		t.Fatalf("creating schema: %v", err)
-	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), url)
-		if err != nil {
-			t.Errorf("connecting to drop schema: %v", err)
-			return
-		}
-		defer conn.Close(context.Background())
-		if _, err := conn.Exec(context.Background(), "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE"); err != nil {
-			t.Errorf("dropping schema: %v", err)
-		}
-	})
-
-	cfg, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatalf("parsing TEST_DATABASE_URL: %v", err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-
-	sqlDB := stdlib.OpenDB(*cfg.ConnConfig)
-	defer sqlDB.Close()
-	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, os.DirFS("../../db/migrations"))
-	if err != nil {
-		t.Fatalf("creating migration provider: %v", err)
-	}
-	if _, err := provider.Up(ctx); err != nil {
-		t.Fatalf("applying migrations: %v", err)
-	}
-
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("creating pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	return db.New(pool)
+	return db.New(pgtest.NewPool(t))
 }
 
 func testChallenge(slug string, category domain.Category, difficulty domain.Difficulty) *domain.Challenge {

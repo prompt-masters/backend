@@ -11,21 +11,38 @@ import (
 )
 
 type Querier interface {
+	AddGamePlayer(ctx context.Context, arg AddGamePlayerParams) error
+	// Returns no row when the room code is held by another active game.
+	CreateGame(ctx context.Context, arg CreateGameParams) (*Game, error)
+	CreateGameSettings(ctx context.Context, arg CreateGameSettingsParams) error
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) error
 	CreateUser(ctx context.Context, arg CreateUserParams) (*User, error)
 	CreateVerificationToken(ctx context.Context, arg CreateVerificationTokenParams) (*VerificationToken, error)
 	DeleteExpiredTokens(ctx context.Context) error
 	DeleteVerificationToken(ctx context.Context, token string) error
+	GetActiveGameIDByRoomCode(ctx context.Context, roomCode string) (pgtype.UUID, error)
 	GetActiveRefreshTokenUserID(ctx context.Context, tokenHash string) (pgtype.UUID, error)
 	GetChallengeByID(ctx context.Context, id pgtype.UUID) (*Challenge, error)
+	GetGameByID(ctx context.Context, id pgtype.UUID) (*GetGameByIDRow, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	GetVerificationToken(ctx context.Context, token string) (*VerificationToken, error)
 	ListChallenges(ctx context.Context, arg ListChallengesParams) ([]*Challenge, error)
+	ListGamePlayers(ctx context.Context, gameID pgtype.UUID) ([]*ListGamePlayersRow, error)
+	ListGamesByStatus(ctx context.Context, arg ListGamesByStatusParams) ([]*ListGamesByStatusRow, error)
+	// Row-locks the game so membership and status changes are serialized. Read
+	// the game in a later statement: in READ COMMITTED, anything else computed by
+	// this statement (such as a player count subquery) would use the snapshot from
+	// before the lock wait and miss changes committed by the previous lock holder.
+	LockGameByID(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
+	RemoveGamePlayer(ctx context.Context, arg RemoveGamePlayerParams) (int64, error)
 	RevokeRefreshToken(ctx context.Context, tokenHash string) error
 	RotateRefreshToken(ctx context.Context, arg RotateRefreshTokenParams) (pgtype.UUID, error)
 	SetEmailVerified(ctx context.Context, id pgtype.UUID) error
+	UpdateGameHost(ctx context.Context, arg UpdateGameHostParams) error
+	UpdateGameSettings(ctx context.Context, arg UpdateGameSettingsParams) error
+	UpdateGameStatus(ctx context.Context, arg UpdateGameStatusParams) error
 	UpdateUserEmail(ctx context.Context, arg UpdateUserEmailParams) error
 	UpdateUserUsername(ctx context.Context, arg UpdateUserUsernameParams) error
 	UpsertChallenge(ctx context.Context, arg UpsertChallengeParams) (*Challenge, error)

@@ -125,7 +125,14 @@ make test
 
 Repository tests run against `TEST_DATABASE_URL`. Each test migrates a
 throwaway schema and drops it afterwards, so existing tables are untouched.
-They are skipped when `TEST_DATABASE_URL` is unset.
+They are skipped when `TEST_DATABASE_URL` is unset. The API integration tests
+in `internal/api` use the same database setup.
+
+Run with the race detector to cover the concurrency tests properly:
+
+```sh
+go test -race ./...
+```
 
 ## API
 
@@ -157,6 +164,52 @@ malformed IDs return 404.
 ### `GET /api/v1/challenges/categories`
 
 Returns the list of available categories.
+
+### Games
+
+All game routes require `Authorization: Bearer <access token>`. `{id}` is the
+game's UUID or the 6-digit room code of a waiting or in-progress game, so
+players can join straight from a shared code: `POST /api/v1/games/004213/join`.
+
+| Method | Path | Success | Notes |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/games?status=waiting` | 200 | `status` defaults to `waiting`; newest first, up to 100 |
+| `POST` | `/api/v1/games` | 201 | Creator becomes host and first player |
+| `GET` | `/api/v1/games/{id}` | 200 | Settings and players |
+| `PUT` | `/api/v1/games/{id}/settings` | 200 | Host only, while `waiting`; replaces all settings |
+| `POST` | `/api/v1/games/{id}/join` | 200 | |
+| `POST` | `/api/v1/games/{id}/leave` | 204 | Only while `waiting` |
+| `POST` | `/api/v1/games/{id}/start` | 200 | Host only; `waiting` → `in_progress` |
+| `DELETE` | `/api/v1/games/{id}` | 204 | Host only; sets status `cancelled` |
+
+Settings body, required on create and update:
+
+```json
+{ "rounds": 5, "time_per_round": 90, "difficulty": "medium", "category": "coding",
+  "ai_model": "claude-sonnet-5", "max_players": 4 }
+```
+
+- `rounds`: 3, 5 or 7
+- `time_per_round` (seconds): 60, 90 or 120
+- `difficulty` and `category`: the challenge values above
+- `ai_model`: `claude-opus-5`, `claude-sonnet-5` or `claude-haiku-4-5`
+- `max_players`: 2 to 6, and not below the current player count
+
+Rules:
+
+- **Host leaves:** hosting passes to the player who joined earliest. When no
+  players remain, the game is cancelled.
+- **Start:** needs at least 2 players and at least one challenge for the game's
+  category and difficulty.
+- **Cancel:** allowed while `waiting` or `in_progress`.
+- **Room codes:** unique among active games and reused once a game finishes or
+  is cancelled.
+- **Concurrency:** every change locks the game row, so concurrent joins cannot
+  overfill a room and nothing lands after a game starts.
+
+Status codes: 400 invalid input, 401 unauthenticated, 403 not the host,
+404 unknown game, 409 state conflict (already started, room full, already
+joined, not a player, not enough players, no eligible challenge).
 
 ### Errors
 

@@ -21,6 +21,33 @@ type Challenge struct {
 	UpdatedAt     pgtype.Timestamptz
 }
 
+type Game struct {
+	ID        pgtype.UUID
+	RoomCode  string
+	HostID    pgtype.UUID
+	Status    string
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
+	StartedAt pgtype.Timestamptz
+}
+
+type GamePlayer struct {
+	GameID   pgtype.UUID
+	UserID   pgtype.UUID
+	JoinedAt pgtype.Timestamptz
+}
+
+type GameSetting struct {
+	GameID       pgtype.UUID
+	Rounds       int16
+	TimePerRound int16
+	Difficulty   string
+	Category     string
+	AiModel      string
+	MaxPlayers   int16
+	UpdatedAt    pgtype.Timestamptz
+}
+
 type RefreshToken struct {
 	TokenHash string
 	UserID    pgtype.UUID
