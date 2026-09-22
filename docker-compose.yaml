@@ -17,6 +17,23 @@ services:
       timeout: 3s
       retries: 15
 
+  # Live game state only: nothing here needs to survive a restart, so
+  # persistence is off. The published port is bound to localhost and the
+  # password comes from REDIS_PASSWORD in .env.
+  redis:
+    image: redis:7-alpine
+    container_name: prompters-redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --save '' --appendonly no"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
   # Apply migrations first: make migrate-up (goose) against the running
   # database before starting the app, or run `make migrate-up` after up.
   app:
@@ -25,6 +42,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # The API tolerates Redis being down, so only wait for it to start.
+      redis:
+        condition: service_started
     # Picks up MAIL_* from .env when present. Leave MAIL_HOST empty and
     # verification links are written to `docker compose logs app` instead of
     # being emailed.
@@ -38,6 +58,10 @@ services:
       HOST: 0.0.0.0
       PORT: "8080"
       DATABASE_URL: postgres://postgres:password@postgres:5432/prompters_db?sslmode=disable
+      # Inside the compose network Redis is reachable as "redis"; the password
+      # is the same one the redis service is started with.
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
       APP_BASE_URL: http://localhost:${APP_PORT:-8080}
     ports:
       - "${APP_PORT:-8080}:8080"

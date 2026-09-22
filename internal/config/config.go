@@ -3,10 +3,12 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/prompt-masters/backend/internal/mail"
+	"github.com/prompt-masters/backend/internal/redisclient"
 )
 
 const (
@@ -14,6 +16,16 @@ const (
 	defaultJWTTTL          = 15 * time.Minute
 	defaultRefreshTokenTTL = 30 * 24 * time.Hour
 	defaultMailPort        = 587
+
+	defaultRedisAddr         = "localhost:6379"
+	defaultRedisPoolSize     = 20
+	defaultRedisDialTimeout  = 2 * time.Second
+	defaultRedisReadTimeout  = time.Second
+	defaultRedisWriteTimeout = time.Second
+	defaultRedisOpTimeout    = 2 * time.Second
+	defaultRedisKeyPrefix    = "promptgame"
+	defaultActiveGameTTL     = 2 * time.Hour
+	defaultEndedGameTTL      = 15 * time.Minute
 )
 
 type Config struct {
@@ -25,6 +37,7 @@ type Config struct {
 	RefreshTokenTTL time.Duration
 	AppBaseURL      string
 	Mail            mail.Config
+	Redis           redisclient.Config
 }
 
 func Load() (*Config, error) {
@@ -42,6 +55,23 @@ func Load() (*Config, error) {
 			Username:  os.Getenv("MAIL_USERNAME"),
 			Password:  os.Getenv("MAIL_PASSWORD"),
 			FromEmail: os.Getenv("MAIL_FROM_EMAIL"),
+		},
+		Redis: redisclient.Config{
+			Addr:          envString("REDIS_ADDR", defaultRedisAddr),
+			Username:      os.Getenv("REDIS_USERNAME"),
+			Password:      os.Getenv("REDIS_PASSWORD"),
+			DB:            envInt("REDIS_DB", 0),
+			TLS:           envBool("REDIS_TLS", false),
+			TLSCAFile:     os.Getenv("REDIS_TLS_CA_FILE"),
+			TLSServerName: os.Getenv("REDIS_TLS_SERVER_NAME"),
+			PoolSize:      envInt("REDIS_POOL_SIZE", defaultRedisPoolSize),
+			DialTimeout:   envDuration("REDIS_DIAL_TIMEOUT", defaultRedisDialTimeout),
+			ReadTimeout:   envDuration("REDIS_READ_TIMEOUT", defaultRedisReadTimeout),
+			WriteTimeout:  envDuration("REDIS_WRITE_TIMEOUT", defaultRedisWriteTimeout),
+			OpTimeout:     envDuration("REDIS_OP_TIMEOUT", defaultRedisOpTimeout),
+			KeyPrefix:     envString("REDIS_KEY_PREFIX", defaultRedisKeyPrefix),
+			ActiveGameTTL: envDuration("GAME_STATE_ACTIVE_TTL", defaultActiveGameTTL),
+			EndedGameTTL:  envDuration("GAME_STATE_ENDED_TTL", defaultEndedGameTTL),
 		},
 	}
 
@@ -72,6 +102,9 @@ func Load() (*Config, error) {
 	if cfg.JWTSecret == "" {
 		return nil, fmt.Errorf("JWT_SECRET is required")
 	}
+	if err := cfg.Redis.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid Redis config: %w", err)
+	}
 
 	return cfg, nil
 }
@@ -80,6 +113,29 @@ func envInt(key string, fallback int) int {
 	v := 0
 	fmt.Sscanf(os.Getenv(key), "%d", &v)
 	if v == 0 {
+		return fallback
+	}
+	return v
+}
+
+func envString(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	v, err := strconv.ParseBool(os.Getenv(key))
+	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	v, err := time.ParseDuration(os.Getenv(key))
+	if err != nil {
 		return fallback
 	}
 	return v
