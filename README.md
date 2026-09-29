@@ -228,7 +228,7 @@ players can join straight from a shared code: `POST /api/v1/games/004213/join`.
 | `PUT` | `/api/v1/games/{id}/settings` | 200 | Host only, while `waiting`; replaces all settings |
 | `POST` | `/api/v1/games/{id}/join` | 200 | |
 | `POST` | `/api/v1/games/{id}/leave` | 204 | Only while `waiting` |
-| `POST` | `/api/v1/games/{id}/start` | 200 | Host only; `waiting` → `in_progress` |
+| `POST` | `/api/v1/games/{id}/start` | 200 | Host only; `waiting` → `in_progress`, starts round 1 (see [Game engine](#game-engine)) |
 | `DELETE` | `/api/v1/games/{id}` | 204 | Host only; sets status `cancelled` |
 
 Settings body, required on create and update:
@@ -267,7 +267,7 @@ access token; no route accepts a user ID.
 
 | Method | Path | Success | Notes |
 | --- | --- | --- | --- |
-| `GET` | `/api/v1/games/{id}/live` | 200 | Reconnect snapshot: lobby, players with `is_ready` and `points`, `round` with server-computed `remaining_ms`, your own `draft` |
+| `GET` | `/api/v1/games/{id}/live` | 200 | Reconnect snapshot: lobby, players with `is_ready` and `points`, `round` with server-computed `remaining_ms`, your own `draft`, and the [game engine state](#game-engine) with the stored round deadline |
 | `PUT` | `/api/v1/games/{id}/ready` | 204 | Mark yourself ready (`waiting` games) |
 | `DELETE` | `/api/v1/games/{id}/ready` | 204 | Unmark |
 | `GET` | `/api/v1/games/{id}/draft` | 200 | Your own draft; 404 if you have none |
@@ -322,7 +322,8 @@ GET /ws/games/{id}?token=<access token>
   one of its players, 503 when live state is unavailable.
 - **Origin** is checked against same-origin plus `WS_ALLOWED_ORIGINS`.
   Requests with no `Origin` (native and test clients) are allowed.
-- **On connect** the player receives `game_state`, including their own draft.
+- **On connect** the player receives `game_state`, including their own draft
+  and the stored round deadline, so a refresh never resets the timer.
 
 ### Events
 
@@ -333,9 +334,14 @@ Server to client: `game_state`, `player_joined`, `player_left`, `player_ready`,
 `output_complete`, `player_submitted`, `round_end`, `round_results`,
 `game_end`, `error`.
 
-Client to server: `player_ready`, `prompt_typing`, `heartbeat` (handled now),
-`prompt_test` and `submit_prompt` (answered with an `unsupported_event` error
-until the round and submission services land).
+Client to server: `player_ready`, `prompt_typing`, `heartbeat`,
+`submit_prompt` (handled now), and `prompt_test` (answered with an
+`unsupported_event` error until the prompt testing service lands).
+
+`submit_prompt` is `{"prompt": "...", "round_id": "..."}`; `round_id` is
+optional and, when given, must be the round in play. A player submits once
+per round. Submissions are refused (`not_allowed`) outside `RoundActive` or
+once the server's deadline has passed.
 
 Rules:
 
@@ -343,8 +349,9 @@ Rules:
 - `error`, `output_chunk`, `output_complete` and a player's own draft are sent
   to that one player, never broadcast. `player_submitted` never carries prompt
   text, so judging stays blind.
-- All timing (`round_start`, `timer_tick`, deadlines) comes from the server's
-  Redis state; the client never sets it.
+- All timing (`round_start`, `timer_tick`, deadlines) comes from the server;
+  the client never sets it. Round deadlines are stored in PostgreSQL by the
+  game engine.
 
 ### Behaviour
 
@@ -368,6 +375,69 @@ Rules:
 - **Dead connections** are detected by ping/pong and cleaned up; each connection
   has exactly one reader and one writer goroutine, and both exit on disconnect.
   `Shutdown` closes every socket and waits for those goroutines.
+
+## Game engine
+
+`internal/service/game_engine.go` owns every state change of a game in play
+and the round timer. The server is the only source of truth; clients display
+what they are sent.
+
+### States
+
+| Event | From | To | Guard |
+| --- | --- | --- | --- |
+| `startGame` | `Lobby` | `RoundActive` | Caller is the host (`POST /start`) |
+| `allSubmitted` | `RoundActive` | `Judging` | Every player has submitted |
+| `timerExpired` | `RoundActive` | `Judging` | Server time ≥ `round_deadline` |
+| `judgeCompleted` | `Judging` | `Results` | |
+| `nextRound` | `Results` | `RoundActive` | `current_round < total_rounds` |
+| `finalRound` | `Results` | `GameOver` | `current_round == total_rounds` |
+
+Any other pair is rejected with `domain.ErrInvalidTransition` (409) and
+changes nothing. The table is `domain/game_phase.go`, which is pure and
+tested without a database, sockets or real time.
+
+`games.status` stays the coarse lifecycle: `Lobby` is `waiting`,
+`RoundActive`/`Judging`/`Results` are `in_progress`, `GameOver` is
+`finished`. A cancelled game keeps its phase and never moves again.
+
+`judgeCompleted` and `nextRound`/`finalRound` are exposed as
+`GameEngine.CompleteJudging` and `GameEngine.Advance` for the judging service;
+nothing calls them yet, so a live game currently stops in `Judging`.
+
+### Timing and consistency
+
+- Entering `RoundActive` sets `round_started_at` and `round_deadline` from the
+  server clock and stores them in `games` (UTC Unix milliseconds) with a new
+  `round_id`, before anything is broadcast.
+- A Go timer fires `timerExpired` at the deadline and is stopped when the
+  round ends early. Events carry their `round_id`; one for any other round is
+  ignored.
+- Each transition row-locks the game and stores the new state with a
+  compare-and-set on phase, status and `round_id`, so the timer and the last
+  submission racing, or two server instances, end a round exactly once.
+- **Restart:** on start-up every `RoundActive` game is either ended (deadline
+  passed) or has its timer re-armed for the time it has left.
+
+The WebSocket hub is in-process, so with several instances a transition is
+only broadcast to clients connected to the instance that made it; the
+database stays consistent either way.
+
+### `game_state` fields
+
+Every `game_state` (on connect, and after each transition) carries:
+
+```json
+{ "type": "game_state", "payload": { "game": {}, "players": [],
+  "state": "RoundActive", "current_round": 2, "total_rounds": 5,
+  "round_id": "…", "round_started_at": 1759100000000,
+  "round_deadline": 1759100060000, "server_time": 1759100000123 } }
+```
+
+`round_*` fields are omitted before round 1. To render the countdown, take
+`offset = server_time - client_now` on receipt and show
+`round_deadline - (client_now + offset)`. `round_end` (with `round_id` and
+`reason`: `all_submitted` or `time_expired`) precedes the `Judging` state.
 
 ## Redis (live game state)
 
