@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/prompt-masters/backend/internal/domain"
@@ -55,6 +56,7 @@ func (h *recordingHub) types() []ws.Type {
 type routerFixture struct {
 	*liveFixture
 	hub     *recordingHub
+	events  *recordingEvents
 	router  *WSRouter
 	replies []ws.Payload
 }
@@ -63,7 +65,11 @@ func newRouterFixture(t *testing.T, status domain.GameStatus) *routerFixture {
 	t.Helper()
 	live := newLiveFixture(t, status, true)
 	hub := &recordingHub{}
-	return &routerFixture{liveFixture: live, hub: hub, router: NewWSRouter(live.svc, hub, log.New(live.logs, "", 0))}
+	events := &recordingEvents{}
+	logger := log.New(live.logs, "", 0)
+	engine := NewGameEngine(live.games, newFakeClock(liveNow), events, live.svc, logger)
+	t.Cleanup(engine.Close)
+	return &routerFixture{liveFixture: live, hub: hub, events: events, router: NewWSRouter(live.svc, engine, hub, logger)}
 }
 
 // route sends one client message as userID and collects any reply.
@@ -183,9 +189,8 @@ func TestWSRouterUnsupportedAndUnknownEvents(t *testing.T) {
 	f := newRouterFixture(t, domain.GameStatusInProgress)
 
 	tests := map[ws.Type]string{
-		ws.TypeClientPromptTest:   ws.CodeUnsupportedEvent,
-		ws.TypeClientSubmitPrompt: ws.CodeUnsupportedEvent,
-		"who_knows":               ws.CodeUnknownEvent,
+		ws.TypeClientPromptTest: ws.CodeUnsupportedEvent,
+		"who_knows":             ws.CodeUnknownEvent,
 	}
 	for eventType, wantCode := range tests {
 		payload := errorReply(t, f.route(f.guest, eventType, `{"prompt":"secret text"}`))
@@ -196,4 +201,73 @@ func TestWSRouterUnsupportedAndUnknownEvents(t *testing.T) {
 	if got := f.hub.types(); len(got) != 0 {
 		t.Errorf("broadcast %v, want none", got)
 	}
+}
+
+func TestWSRouterSubmitPrompt(t *testing.T) {
+	// activeRound puts the fixture's game in round 1, due in a minute.
+	activeRound := func(f *routerFixture) uuid.UUID {
+		roundID := uuid.New()
+		f.games.mu.Lock()
+		defer f.games.mu.Unlock()
+		f.games.games[f.game.ID].Progress = domain.GameProgress{
+			Phase: domain.GamePhaseRoundActive, CurrentRound: 1, RoundID: roundID,
+			RoundStartedAt: liveNow.Add(-30 * time.Second), RoundDeadline: liveNow.Add(time.Minute),
+		}
+		return roundID
+	}
+
+	t.Run("records the submission and announces it", func(t *testing.T) {
+		f := newRouterFixture(t, domain.GameStatusInProgress)
+		roundID := activeRound(f)
+
+		if replies := f.route(f.guest, ws.TypeClientSubmitPrompt, `{"prompt":"secret text","round_id":"`+roundID.String()+`"}`); len(replies) != 0 {
+			t.Fatalf("replies = %+v, want none", replies)
+		}
+		if subs := f.games.submissions[roundID]; len(subs) != 1 || subs[0].UserID != f.guest || subs[0].Prompt != "secret text" {
+			t.Errorf("stored submissions = %+v", subs)
+		}
+		if kinds := f.events.kinds(); !slices.Equal(kinds, []string{"player_submitted"}) {
+			t.Errorf("published %v, want player_submitted", kinds)
+		}
+	})
+
+	t.Run("refusals answer the sender", func(t *testing.T) {
+		f := newRouterFixture(t, domain.GameStatusInProgress)
+		roundID := activeRound(f)
+		if replies := f.route(f.host, ws.TypeClientSubmitPrompt, `{"prompt":"first"}`); len(replies) != 0 {
+			t.Fatalf("replies = %+v, want none", replies)
+		}
+
+		tests := []struct {
+			name     string
+			sender   uuid.UUID
+			payload  string
+			wantCode string
+		}{
+			{name: "not an object", sender: f.guest, payload: `"hi"`, wantCode: ws.CodeInvalidPayload},
+			{name: "malformed round_id", sender: f.guest, payload: `{"prompt":"p","round_id":"nope"}`, wantCode: ws.CodeInvalidPayload},
+			{name: "blank prompt", sender: f.guest, payload: `{"prompt":" "}`, wantCode: ws.CodeInvalidPayload},
+			{name: "another round", sender: f.guest, payload: `{"prompt":"p","round_id":"` + uuid.NewString() + `"}`, wantCode: ws.CodeNotAllowed},
+			{name: "second submission", sender: f.host, payload: `{"prompt":"again"}`, wantCode: ws.CodeNotAllowed},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				payload := errorReply(t, f.route(tt.sender, ws.TypeClientSubmitPrompt, tt.payload))
+				if payload.Code != tt.wantCode {
+					t.Errorf("error = %+v, want code %q", payload, tt.wantCode)
+				}
+			})
+		}
+		if n := len(f.games.submissions[roundID]); n != 1 {
+			t.Errorf("stored %d submissions, want only the first", n)
+		}
+	})
+
+	t.Run("outside an active round", func(t *testing.T) {
+		f := newRouterFixture(t, domain.GameStatusInProgress) // seeded in Judging
+		payload := errorReply(t, f.route(f.guest, ws.TypeClientSubmitPrompt, `{"prompt":"p"}`))
+		if payload.Code != ws.CodeNotAllowed || !strings.Contains(payload.Message, "not accepting submissions") {
+			t.Errorf("error = %+v, want not_allowed for a closed round", payload)
+		}
+	})
 }

@@ -49,7 +49,8 @@ var _ LiveStateSyncer = (*LiveStateService)(nil)
 
 // GetLiveState rebuilds everything a reconnecting player needs: lobby,
 // roster, readiness, current round with its remaining time, their own draft
-// and points. Only players of the game may read it.
+// and points, plus the game engine's state with the stored round deadline.
+// Only players of the game may read it.
 func (s *LiveStateService) GetLiveState(ctx context.Context, userID uuid.UUID, ref string) (*domain.LiveGameState, error) {
 	gameID, err := s.resolve(ctx, ref)
 	if err != nil {
@@ -74,8 +75,14 @@ func (s *LiveStateService) GetLiveState(ctx context.Context, userID uuid.UUID, r
 		}
 	}
 
+	progress, err := s.progress(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	live.Progress = *progress
+	live.ServerTime = s.now()
 	if live.Round != nil {
-		live.RoundRemaining = live.Round.Remaining(s.now())
+		live.RoundRemaining = live.Round.Remaining(live.ServerTime)
 	}
 	return live, nil
 }
@@ -279,12 +286,25 @@ func (s *LiveStateService) rebuild(ctx context.Context, gameID, userID uuid.UUID
 		s.SyncGame(ctx, game)
 	}
 	return &domain.LiveGameState{
-		Lobby:   lobbyFromGame(game, s.now()),
-		Players: livePlayersFromGame(game),
-		Ready:   []uuid.UUID{},
-		Points:  map[uuid.UUID]int64{},
-		Rebuilt: true,
+		Lobby:      lobbyFromGame(game, s.now()),
+		Players:    livePlayersFromGame(game),
+		Ready:      []uuid.UUID{},
+		Points:     map[uuid.UUID]int64{},
+		Rebuilt:    true,
+		Progress:   game.Progress,
+		ServerTime: s.now(),
 	}, nil
+}
+
+// progress reads the game engine's state, which PostgreSQL owns.
+func (s *LiveStateService) progress(ctx context.Context, gameID uuid.UUID) (*domain.GameProgress, error) {
+	var progress *domain.GameProgress
+	err := s.tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
+		var err error
+		progress, err = repos.Games.GetProgress(ctx, gameID)
+		return err
+	})
+	return progress, err
 }
 
 func (s *LiveStateService) game(ctx context.Context, gameID uuid.UUID) (*domain.Game, error) {

@@ -12,10 +12,12 @@ import (
 
 type Querier interface {
 	AddGamePlayer(ctx context.Context, arg AddGamePlayerParams) error
+	CountRoundSubmissions(ctx context.Context, roundID pgtype.UUID) (int32, error)
 	// Returns no row when the room code is held by another active game.
 	CreateGame(ctx context.Context, arg CreateGameParams) (*Game, error)
 	CreateGameSettings(ctx context.Context, arg CreateGameSettingsParams) error
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) error
+	CreateRoundSubmission(ctx context.Context, arg CreateRoundSubmissionParams) error
 	CreateUser(ctx context.Context, arg CreateUserParams) (*User, error)
 	CreateVerificationToken(ctx context.Context, arg CreateVerificationTokenParams) (*VerificationToken, error)
 	DeleteExpiredTokens(ctx context.Context) error
@@ -24,12 +26,14 @@ type Querier interface {
 	GetActiveRefreshTokenUserID(ctx context.Context, tokenHash string) (pgtype.UUID, error)
 	GetChallengeByID(ctx context.Context, id pgtype.UUID) (*Challenge, error)
 	GetGameByID(ctx context.Context, id pgtype.UUID) (*GetGameByIDRow, error)
+	GetGameProgress(ctx context.Context, id pgtype.UUID) (*GetGameProgressRow, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	GetVerificationToken(ctx context.Context, token string) (*VerificationToken, error)
 	ListChallenges(ctx context.Context, arg ListChallengesParams) ([]*Challenge, error)
 	ListGamePlayers(ctx context.Context, gameID pgtype.UUID) ([]*ListGamePlayersRow, error)
+	ListGamesByPhase(ctx context.Context, phase string) ([]*ListGamesByPhaseRow, error)
 	ListGamesByStatus(ctx context.Context, arg ListGamesByStatusParams) ([]*ListGamesByStatusRow, error)
 	// Row-locks the game so membership and status changes are serialized. Read
 	// the game in a later statement: in READ COMMITTED, anything else computed by
@@ -41,6 +45,10 @@ type Querier interface {
 	RotateRefreshToken(ctx context.Context, arg RotateRefreshTokenParams) (pgtype.UUID, error)
 	SetEmailVerified(ctx context.Context, id pgtype.UUID) error
 	UpdateGameHost(ctx context.Context, arg UpdateGameHostParams) error
+	// Compare-and-set: applies only while the stored phase, status and round are
+	// still the ones the change was decided from, so a duplicate or stale
+	// transition updates no row, even from another server instance.
+	UpdateGameProgress(ctx context.Context, arg UpdateGameProgressParams) (int64, error)
 	UpdateGameSettings(ctx context.Context, arg UpdateGameSettingsParams) error
 	UpdateGameStatus(ctx context.Context, arg UpdateGameStatusParams) error
 	UpdateUserEmail(ctx context.Context, arg UpdateUserEmailParams) error
