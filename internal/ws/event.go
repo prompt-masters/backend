@@ -141,6 +141,20 @@ type GameStatePayload struct {
 	// Rebuilt reports state rebuilt from the database because live state was
 	// missing.
 	Rebuilt bool `json:"rebuilt"`
+
+	// The game engine's state, always read from the database. Timestamps are
+	// UTC Unix milliseconds. A client renders the countdown as
+	// round_deadline - (client_now + server_time - client_receive_time); a
+	// reconnect gets the stored deadline, so a refresh never resets it.
+	State        string `json:"state"`
+	CurrentRound int    `json:"current_round"`
+	TotalRounds  int    `json:"total_rounds"`
+	// RoundID, RoundStartedAt and RoundDeadline describe the current or last
+	// round and are omitted before the first one.
+	RoundID        string `json:"round_id,omitempty"`
+	RoundStartedAt int64  `json:"round_started_at,omitempty"`
+	RoundDeadline  int64  `json:"round_deadline,omitempty"`
+	ServerTime     int64  `json:"server_time"`
 }
 
 func (GameStatePayload) EventType() Type { return TypeGameState }
@@ -301,8 +315,11 @@ type ClientPromptTest struct {
 	Prompt string `json:"prompt"`
 }
 
+// ClientSubmitPrompt is a player's final prompt for the round. RoundID is
+// optional; when set, a submission meant for an earlier round is refused.
 type ClientSubmitPrompt struct {
-	Prompt string `json:"prompt"`
+	Prompt  string `json:"prompt"`
+	RoundID string `json:"round_id,omitempty"`
 }
 
 // Inbound is a decoded client message handed to a Router. UserID comes from

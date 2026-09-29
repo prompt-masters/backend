@@ -30,4 +30,15 @@ type GameRepository interface {
 	RemovePlayer(ctx context.Context, gameID, userID uuid.UUID) error
 	UpdateHost(ctx context.Context, gameID, hostID uuid.UUID) error
 	UpdateStatus(ctx context.Context, gameID uuid.UUID, status domain.GameStatus) error
+
+	// GetProgress reads the game engine's state of a game.
+	GetProgress(ctx context.Context, id uuid.UUID) (*domain.GameProgress, error)
+	// UpdateProgress stores the engine's move from one state to the next, with
+	// the status that goes with the new phase. It is a compare-and-set: when
+	// the stored phase, status or round no longer match from, nothing is
+	// written and domain.ErrStaleGameState is returned.
+	UpdateProgress(ctx context.Context, gameID uuid.UUID, from, to domain.GameProgress) error
+	// ListByPhase returns every game in the phase, with settings but without
+	// players.
+	ListByPhase(ctx context.Context, phase domain.GamePhase) ([]*domain.Game, error)
 }

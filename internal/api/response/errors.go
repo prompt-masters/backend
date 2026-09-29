@@ -53,6 +53,12 @@ func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 		WriteError(w, http.StatusForbidden, "Only players of this game can do this.")
 	case errors.Is(err, domain.ErrGameNotInProgress):
 		WriteError(w, http.StatusConflict, "This game is not in progress.")
+	case errors.Is(err, domain.ErrInvalidTransition), errors.Is(err, domain.ErrStaleGameState):
+		WriteError(w, http.StatusConflict, "The game is not in a state that allows this.")
+	case errors.Is(err, domain.ErrRoundNotActive):
+		WriteError(w, http.StatusConflict, "The round is not accepting submissions.")
+	case errors.Is(err, domain.ErrAlreadySubmitted):
+		WriteError(w, http.StatusConflict, "You have already submitted this round.")
 	case errors.Is(err, domain.ErrStateNotFound):
 		WriteError(w, http.StatusNotFound, "The requested live state was not found.")
 	case errors.Is(err, domain.ErrStateUnavailable):

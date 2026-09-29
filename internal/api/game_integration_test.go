@@ -104,6 +104,7 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 		live   *service.LiveStateService
 		syncer service.LiveStateSyncer = noopSyncer{}
 	)
+	events := service.NewGameEvents(hub, logger, time.Now)
 	if redisClient != nil {
 		store, err := redisstore.New(redisClient, redisstore.Options{
 			KeyPrefix: keyPrefix,
@@ -116,9 +117,13 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 		}
 		live = service.NewLiveStateService(store, transactor, logger, time.Now)
 		syncer = live
-		hub.SetRouter(service.NewWSRouter(live, hub, logger))
 	}
-	gameService := service.NewGameService(transactor, service.MathRandom{}, syncer, service.NewGameEvents(hub, logger))
+	engine := service.NewGameEngine(transactor, service.SystemClock{}, events, syncer, logger)
+	t.Cleanup(engine.Close)
+	if live != nil {
+		hub.SetRouter(service.NewWSRouter(live, engine, hub, logger))
+	}
+	gameService := service.NewGameService(transactor, service.MathRandom{}, syncer, events, engine)
 	websocketHandler := handler.NewWebSocketHandler(hub, live, jwtSecret, []string{"https://app.example.com"}, logger)
 
 	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, websocketHandler, nil, logger, jwtSecret).Routes())
