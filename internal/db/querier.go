@@ -35,6 +35,7 @@ type Querier interface {
 	ListGamePlayers(ctx context.Context, gameID pgtype.UUID) ([]*ListGamePlayersRow, error)
 	ListGamesByPhase(ctx context.Context, phase string) ([]*ListGamesByPhaseRow, error)
 	ListGamesByStatus(ctx context.Context, arg ListGamesByStatusParams) ([]*ListGamesByStatusRow, error)
+	ListRoundSubmissions(ctx context.Context, roundID pgtype.UUID) ([]*RoundSubmission, error)
 	// Row-locks the game so membership and status changes are serialized. Read
 	// the game in a later statement: in READ COMMITTED, anything else computed by
 	// this statement (such as a player count subquery) would use the snapshot from

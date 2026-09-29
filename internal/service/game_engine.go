@@ -60,12 +60,24 @@ type GameEngine struct {
 	live   LiveStateSyncer
 	logger *log.Logger
 	newID  func() uuid.UUID
+	// background is cancelled by Close; judging runs under it.
+	background context.Context
+	stop       context.CancelFunc
 
-	// mu guards games, closed and every engineGame's timer fields.
+	// mu guards games, closed, judge and every engineGame's timer fields.
 	mu       sync.Mutex
 	games    map[uuid.UUID]*engineGame
 	closed   bool
+	judge    RoundJudger
 	inflight sync.WaitGroup
+}
+
+// RoundJudger scores a round once it has entered Judging. The engine calls it
+// on its own goroutine after the transition has been committed and the game's
+// lock released, so AI latency never holds up transitions or the round timer.
+// ctx is cancelled when the engine closes.
+type RoundJudger interface {
+	JudgeRound(ctx context.Context, gameID, roundID uuid.UUID)
 }
 
 // engineGame is what the engine keeps in memory for one game.
@@ -81,15 +93,26 @@ type engineGame struct {
 }
 
 func NewGameEngine(tx repository.Transactor, clock Clock, events GameEventPublisher, live LiveStateSyncer, logger *log.Logger) *GameEngine {
+	background, stop := context.WithCancel(context.Background())
 	return &GameEngine{
-		tx:     tx,
-		clock:  clock,
-		events: events,
-		live:   live,
-		logger: logger,
-		newID:  uuid.New,
-		games:  map[uuid.UUID]*engineGame{},
+		tx:         tx,
+		clock:      clock,
+		events:     events,
+		live:       live,
+		logger:     logger,
+		newID:      uuid.New,
+		background: background,
+		stop:       stop,
+		games:      map[uuid.UUID]*engineGame{},
 	}
+}
+
+// SetJudge attaches the round judge. It exists because the judge needs the
+// engine to complete judging; call it during start-up, before Recover.
+func (e *GameEngine) SetJudge(judge RoundJudger) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.judge = judge
 }
 
 // step is what a decision asks of apply: the event to fire, if any, and a
@@ -212,17 +235,26 @@ func (e *GameEngine) roundEvent(ctx context.Context, gameID, roundID uuid.UUID, 
 
 // Recover resumes the rounds that were in play when the server stopped: a
 // round whose deadline has passed is ended, any other has its timer armed for
-// the time it has left. Other instances may recover the same rounds; the
-// compare-and-set lets only one of them end each.
+// the time it has left, and a round left in Judging is judged again. Other
+// instances may recover the same rounds; the compare-and-set lets only one
+// of them end each.
 func (e *GameEngine) Recover(ctx context.Context) error {
-	var games []*domain.Game
+	var games, judging []*domain.Game
 	err := e.tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
 		var err error
-		games, err = repos.Games.ListByPhase(ctx, domain.GamePhaseRoundActive)
+		if games, err = repos.Games.ListByPhase(ctx, domain.GamePhaseRoundActive); err != nil {
+			return err
+		}
+		judging, err = repos.Games.ListByPhase(ctx, domain.GamePhaseJudging)
 		return err
 	})
 	if err != nil {
 		return err
+	}
+	for _, g := range judging {
+		if g.Status == domain.GameStatusInProgress {
+			e.startJudging(g.ID, g.Progress.RoundID)
+		}
 	}
 
 	var (
@@ -263,8 +295,8 @@ func (e *GameEngine) Forget(gameID uuid.UUID) {
 	}
 }
 
-// Close stops every timer and waits for timer-driven transitions already
-// running. Rounds left in play are picked up by Recover on the next start.
+// Close stops every timer, cancels judging in progress, and waits for both.
+// Rounds left in play are picked up by Recover on the next start.
 func (e *GameEngine) Close() {
 	e.mu.Lock()
 	e.closed = true
@@ -272,7 +304,25 @@ func (e *GameEngine) Close() {
 		g.stopTimer()
 	}
 	e.mu.Unlock()
+	e.stop()
 	e.inflight.Wait()
+}
+
+// startJudging hands roundID to the judge on its own goroutine.
+func (e *GameEngine) startJudging(gameID, roundID uuid.UUID) {
+	e.mu.Lock()
+	judge := e.judge
+	if e.closed || judge == nil {
+		e.mu.Unlock()
+		return
+	}
+	e.inflight.Add(1)
+	e.mu.Unlock()
+
+	go func() {
+		defer e.inflight.Done()
+		judge.JudgeRound(e.background, gameID, roundID)
+	}()
 }
 
 // apply runs one transition of gameID; see GameEngine for the steps. decide
@@ -356,6 +406,10 @@ func (e *GameEngine) committed(ctx context.Context, from domain.GameProgress, ga
 		e.events.RoundEnded(ctx, game, reason)
 	}
 	e.events.GameUpdated(ctx, game)
+	if to.Phase == domain.GamePhaseJudging {
+		// Published first, so the room sees Judging before any result.
+		e.startJudging(game.ID, to.RoundID)
+	}
 }
 
 // game returns the engine's in-memory record of gameID, creating it on first

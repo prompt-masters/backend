@@ -249,6 +249,10 @@ func (r fakeSubmissionRepo) CountByRound(_ context.Context, roundID uuid.UUID) (
 	return len(r.s.submissions[roundID]), nil
 }
 
+func (r fakeSubmissionRepo) ListByRound(_ context.Context, roundID uuid.UUID) ([]domain.Submission, error) {
+	return slices.Clone(r.s.submissions[roundID]), nil
+}
+
 // sequenceRandom returns its values in order, then repeats the last one.
 type sequenceRandom struct {
 	values []int

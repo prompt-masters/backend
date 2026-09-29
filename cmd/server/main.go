@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prompt-masters/backend/internal/ai"
+	"github.com/prompt-masters/backend/internal/ai/providers"
 	"github.com/prompt-masters/backend/internal/api"
 	"github.com/prompt-masters/backend/internal/api/handler"
 	"github.com/prompt-masters/backend/internal/config"
@@ -98,6 +100,24 @@ func run(logger *log.Logger) error {
 	gameEvents := service.NewGameEvents(hub, logger, clock.Now)
 	gameEngine := service.NewGameEngine(transactor, clock, gameEvents, liveStateService, logger)
 	defer gameEngine.Close()
+	if cfg.AIEnabled {
+		// No client timeout: every AI call is bounded by its role's timeout
+		// through its context, which also covers streamed responses.
+		aiClients, err := providers.Registry().Clients(cfg.AI, &http.Client{})
+		if err != nil {
+			return err
+		}
+		orchestrator, err := ai.NewOrchestrator(cfg.AI, aiClients, logger)
+		if err != nil {
+			return err
+		}
+		// Rounds do not record their challenge yet, so there is no
+		// RoundChallenges source: judging logs and skips until there is.
+		gameEngine.SetJudge(service.NewRoundJudge(orchestrator, transactor, nil, gameEngine, logger))
+		logger.Printf("ai enabled: executor=%s judge=%s", cfg.AI.Executor.Target, cfg.AI.Judge.Target)
+	} else {
+		logger.Printf("ai disabled (AI_ENABLED is not set): rounds are not judged")
+	}
 	// Resume the rounds that were in play before the server stopped.
 	if err := gameEngine.Recover(ctx); err != nil {
 		return err

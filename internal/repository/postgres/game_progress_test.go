@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -194,5 +195,19 @@ func TestSubmissionRepository(t *testing.T) {
 	n, err := repo.CountByRound(ctx, roundID)
 	if err != nil || n != 2 {
 		t.Errorf("CountByRound() = %d, %v; want 2", n, err)
+	}
+
+	subs, err := repo.ListByRound(ctx, roundID)
+	if err != nil || len(subs) != 2 {
+		t.Fatalf("ListByRound() = %d, %v; want 2", len(subs), err)
+	}
+	// Both were submitted in the same millisecond, so either may come first.
+	i := slices.IndexFunc(subs, func(s domain.Submission) bool { return s.UserID == host })
+	if i < 0 {
+		t.Fatalf("host's submission missing from %+v", subs)
+	}
+	if got := subs[i]; got.Prompt != "p" || got.RoundNumber != 1 || got.GameID != g.ID || got.RoundID != roundID ||
+		got.SubmittedAt.UnixMilli() != sub.SubmittedAt.UnixMilli() {
+		t.Errorf("host's submission = %+v", got)
 	}
 }

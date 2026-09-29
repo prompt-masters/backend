@@ -47,3 +47,36 @@ func (q *Queries) CreateRoundSubmission(ctx context.Context, arg CreateRoundSubm
 	)
 	return err
 }
+
+const ListRoundSubmissions = `-- name: ListRoundSubmissions :many
+SELECT round_id, game_id, round_number, user_id, prompt, submitted_at_ms FROM round_submissions
+WHERE round_id = $1
+ORDER BY submitted_at_ms, user_id
+`
+
+func (q *Queries) ListRoundSubmissions(ctx context.Context, roundID pgtype.UUID) ([]*RoundSubmission, error) {
+	rows, err := q.db.Query(ctx, ListRoundSubmissions, roundID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*RoundSubmission{}
+	for rows.Next() {
+		var i RoundSubmission
+		if err := rows.Scan(
+			&i.RoundID,
+			&i.GameID,
+			&i.RoundNumber,
+			&i.UserID,
+			&i.Prompt,
+			&i.SubmittedAtMs,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

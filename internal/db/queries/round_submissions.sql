@@ -4,3 +4,8 @@ VALUES ($1, $2, $3, $4, $5, $6);
 
 -- name: CountRoundSubmissions :one
 SELECT COUNT(*)::int FROM round_submissions WHERE round_id = $1;
+
+-- name: ListRoundSubmissions :many
+SELECT * FROM round_submissions
+WHERE round_id = $1
+ORDER BY submitted_at_ms, user_id;

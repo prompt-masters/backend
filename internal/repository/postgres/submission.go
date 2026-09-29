@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -39,4 +40,23 @@ func (r *SubmissionRepository) Create(ctx context.Context, s domain.Submission) 
 func (r *SubmissionRepository) CountByRound(ctx context.Context, roundID uuid.UUID) (int, error) {
 	n, err := r.queries.CountRoundSubmissions(ctx, pgUUID(roundID))
 	return int(n), err
+}
+
+func (r *SubmissionRepository) ListByRound(ctx context.Context, roundID uuid.UUID) ([]domain.Submission, error) {
+	rows, err := r.queries.ListRoundSubmissions(ctx, pgUUID(roundID))
+	if err != nil {
+		return nil, err
+	}
+	subs := make([]domain.Submission, len(rows))
+	for i, row := range rows {
+		subs[i] = domain.Submission{
+			RoundID:     uuidFromPg(row.RoundID),
+			GameID:      uuidFromPg(row.GameID),
+			RoundNumber: int(row.RoundNumber),
+			UserID:      uuidFromPg(row.UserID),
+			Prompt:      row.Prompt,
+			SubmittedAt: time.UnixMilli(row.SubmittedAtMs).UTC(),
+		}
+	}
+	return subs, nil
 }
