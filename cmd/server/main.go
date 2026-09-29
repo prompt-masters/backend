@@ -88,17 +88,24 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	liveStateService := service.NewLiveStateService(gameStateStore, transactor, logger, time.Now)
+	clock := service.SystemClock{}
+	liveStateService := service.NewLiveStateService(gameStateStore, transactor, logger, clock.Now)
 
 	hub, err := ws.NewHub(cfg.WS.Hub, nil, logger)
 	if err != nil {
 		return err
 	}
+	gameEvents := service.NewGameEvents(hub, logger, clock.Now)
+	gameEngine := service.NewGameEngine(transactor, clock, gameEvents, liveStateService, logger)
+	defer gameEngine.Close()
+	// Resume the rounds that were in play before the server stopped.
+	if err := gameEngine.Recover(ctx); err != nil {
+		return err
+	}
 	// The router needs the hub to broadcast, and the hub needs the router to
 	// deliver client messages, so it is attached once both exist.
-	hub.SetRouter(service.NewWSRouter(liveStateService, hub, logger))
-	gameEvents := service.NewGameEvents(hub, logger)
-	gameService := service.NewGameService(transactor, service.MathRandom{}, liveStateService, gameEvents)
+	hub.SetRouter(service.NewWSRouter(liveStateService, gameEngine, hub, logger))
+	gameService := service.NewGameService(transactor, service.MathRandom{}, liveStateService, gameEvents, gameEngine)
 	websocketHandler := handler.NewWebSocketHandler(hub, liveStateService, cfg.JWTSecret, cfg.WS.AllowedOrigins, logger)
 
 	healthChecks := []handler.HealthCheck{

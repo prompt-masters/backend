@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/prompt-masters/backend/internal/domain"
@@ -22,26 +23,45 @@ type EventBroadcaster interface {
 type GameEvents struct {
 	hub    EventBroadcaster
 	logger *log.Logger
+	// now stamps game_state with the server time clients sync their
+	// countdown to.
+	now func() time.Time
 }
 
-func NewGameEvents(hub EventBroadcaster, logger *log.Logger) *GameEvents {
-	return &GameEvents{hub: hub, logger: logger}
+func NewGameEvents(hub EventBroadcaster, logger *log.Logger, now func() time.Time) *GameEvents {
+	return &GameEvents{hub: hub, logger: logger, now: now}
 }
 
 var _ GameEventPublisher = (*GameEvents)(nil)
 
 func (e *GameEvents) PlayerJoined(_ context.Context, game *domain.Game, userID uuid.UUID) {
 	e.publish(game.ID, ws.PlayerJoinedFrom(game, userID))
-	e.publish(game.ID, ws.GameStateFromGame(game))
+	e.publish(game.ID, ws.GameStateFromGame(game, e.now()))
 }
 
 func (e *GameEvents) PlayerLeft(_ context.Context, game *domain.Game, userID uuid.UUID, username string, hostChanged bool) {
 	e.publish(game.ID, ws.PlayerLeftFrom(game, userID, username, hostChanged))
-	e.publish(game.ID, ws.GameStateFromGame(game))
+	e.publish(game.ID, ws.GameStateFromGame(game, e.now()))
 }
 
 func (e *GameEvents) GameUpdated(_ context.Context, game *domain.Game) {
-	e.publish(game.ID, ws.GameStateFromGame(game))
+	e.publish(game.ID, ws.GameStateFromGame(game, e.now()))
+}
+
+func (e *GameEvents) PlayerSubmitted(_ context.Context, game *domain.Game, userID uuid.UUID, submittedAt time.Time) {
+	e.publish(game.ID, ws.PlayerSubmittedPayload{
+		UserID:      userID.String(),
+		RoundNumber: game.Progress.CurrentRound,
+		SubmittedAt: submittedAt.UTC(),
+	})
+}
+
+func (e *GameEvents) RoundEnded(_ context.Context, game *domain.Game, reason string) {
+	e.publish(game.ID, ws.RoundEndPayload{
+		RoundNumber: game.Progress.CurrentRound,
+		RoundID:     game.Progress.RoundID.String(),
+		Reason:      reason,
+	})
 }
 
 func (e *GameEvents) publish(gameID uuid.UUID, payload ws.Payload) {

@@ -24,4 +24,8 @@ var (
 	ErrGameNotInProgress        = errors.New("game is not in progress")
 	ErrStateNotFound            = errors.New("live game state not found")
 	ErrStateUnavailable         = errors.New("live game state is temporarily unavailable")
+	ErrInvalidTransition        = errors.New("invalid game state transition")
+	ErrStaleGameState           = errors.New("game state was changed concurrently")
+	ErrRoundNotActive           = errors.New("round is not accepting submissions")
+	ErrAlreadySubmitted         = errors.New("already submitted this round")
 )

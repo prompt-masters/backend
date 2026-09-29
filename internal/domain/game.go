@@ -98,7 +98,9 @@ type Game struct {
 	Settings    GameSettings
 	PlayerCount int
 	// Players is only loaded for single-game lookups, ordered by join time.
-	Players   []GamePlayer
+	Players []GamePlayer
+	// Progress is the game engine's state; its TotalRounds is Settings.Rounds.
+	Progress  GameProgress
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	StartedAt *time.Time

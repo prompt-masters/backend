@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/google/uuid"
 	"github.com/prompt-masters/backend/internal/domain"
 	"github.com/prompt-masters/backend/internal/ws"
 )
@@ -14,16 +15,17 @@ import (
 // WSRouter handles client messages arriving over WebSocket. The hub decides
 // nothing: it hands messages here, and this decides what they mean.
 //
-// prompt_test and submit_prompt are answered with an unsupported_event error
-// until the round and submission services exist.
+// prompt_test is answered with an unsupported_event error until the prompt
+// testing service exists.
 type WSRouter struct {
 	live   *LiveStateService
+	engine *GameEngine
 	hub    EventBroadcaster
 	logger *log.Logger
 }
 
-func NewWSRouter(live *LiveStateService, hub EventBroadcaster, logger *log.Logger) *WSRouter {
-	return &WSRouter{live: live, hub: hub, logger: logger}
+func NewWSRouter(live *LiveStateService, engine *GameEngine, hub EventBroadcaster, logger *log.Logger) *WSRouter {
+	return &WSRouter{live: live, engine: engine, hub: hub, logger: logger}
 }
 
 var _ ws.Router = (*WSRouter)(nil)
@@ -34,7 +36,9 @@ func (r *WSRouter) Route(ctx context.Context, in ws.Inbound) {
 		r.playerReady(ctx, in)
 	case ws.TypeClientPromptTyping:
 		r.promptTyping(in)
-	case ws.TypeClientPromptTest, ws.TypeClientSubmitPrompt:
+	case ws.TypeClientSubmitPrompt:
+		r.submitPrompt(ctx, in)
+	case ws.TypeClientPromptTest:
 		in.Reply(ws.ErrorPayload{
 			Code:    ws.CodeUnsupportedEvent,
 			Message: fmt.Sprintf("%q is not available yet.", in.Type),
@@ -73,6 +77,27 @@ func (r *WSRouter) playerReady(ctx context.Context, in ws.Inbound) {
 	r.hub.Broadcast(in.GameID, msg)
 }
 
+// submitPrompt hands the player's final prompt to the game engine, which
+// announces it to the room without its text.
+func (r *WSRouter) submitPrompt(ctx context.Context, in ws.Inbound) {
+	var payload ws.ClientSubmitPrompt
+	if err := json.Unmarshal(in.Payload, &payload); err != nil {
+		in.Reply(ws.ErrorPayload{Code: ws.CodeInvalidPayload, Message: "submit_prompt payload must be an object."})
+		return
+	}
+	var roundID uuid.UUID
+	if payload.RoundID != "" {
+		var err error
+		if roundID, err = uuid.Parse(payload.RoundID); err != nil {
+			in.Reply(ws.ErrorPayload{Code: ws.CodeInvalidPayload, Message: "round_id must be a UUID."})
+			return
+		}
+	}
+	if err := r.engine.Submit(ctx, in.GameID, in.UserID, roundID, payload.Prompt); err != nil {
+		in.Reply(r.errorFor(err, in))
+	}
+}
+
 // promptTyping is presence only: it never carries prompt text and is not
 // echoed back to its sender.
 func (r *WSRouter) promptTyping(in ws.Inbound) {
@@ -97,6 +122,10 @@ func (r *WSRouter) errorFor(err error, in ws.Inbound) ws.ErrorPayload {
 		return ws.ErrorPayload{Code: ws.CodeNotAllowed, Message: "This game has already started or ended."}
 	case errors.Is(err, domain.ErrGameNotInProgress):
 		return ws.ErrorPayload{Code: ws.CodeNotAllowed, Message: "This game is not in progress."}
+	case errors.Is(err, domain.ErrRoundNotActive):
+		return ws.ErrorPayload{Code: ws.CodeNotAllowed, Message: "The round is not accepting submissions."}
+	case errors.Is(err, domain.ErrAlreadySubmitted):
+		return ws.ErrorPayload{Code: ws.CodeNotAllowed, Message: "You have already submitted this round."}
 	case errors.Is(err, domain.ErrNotFound), errors.Is(err, domain.ErrStateNotFound):
 		return ws.ErrorPayload{Code: ws.CodeNotAllowed, Message: "The game was not found."}
 	case errors.Is(err, domain.ErrStateUnavailable):
