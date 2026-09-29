@@ -439,6 +439,57 @@ Every `game_state` (on connect, and after each transition) carries:
 `round_deadline - (client_now + offset)`. `round_end` (with `round_id` and
 `reason`: `all_submitted` or `time_expired`) precedes the `Judging` state.
 
+## AI layer
+
+`internal/ai` is provider-agnostic: business logic uses its `AIClient`,
+`Orchestrator` and `AIError` types only. Provider wire formats live in
+`internal/ai/providers/<name>` (Anthropic Messages, OpenAI Chat Completions,
+both over plain `net/http` + SSE); only `cmd/server` wires them in, and
+`TestProviderCodeStaysInAdapters` fails the build if anything else does.
+
+| Package | Role |
+| --- | --- |
+| `internal/ai` | Types, `AIError`, `APIKey`, pricing, registry, `Orchestrator` |
+| `internal/ai/providers/{anthropic,openai}` | Adapters |
+| `internal/ai/providers` | Registry of the built-in adapters |
+| `internal/ai/aitest` | Scriptable fake client for tests |
+
+**Roles.** The *executor* runs each player's prompt with the game's
+`ai_model`, mapped to a provider and model by `AI_EXECUTOR_MODELS`. The *judge*
+scores the outputs against the challenge's rubric and must reply with JSON,
+which is validated (invalid output is retried `AI_JUDGE_PARSE_RETRIES` times,
+then reported as `invalid_output`). One adapter per provider serves both roles
+with different model, timeout and limits.
+
+**Swapping providers** is configuration only: set `AI_EXECUTOR_PROVIDER` /
+`AI_JUDGE_PROVIDER` (and the model and mapping variables) to any registered
+name; its key is read from `<NAME>_API_KEY`. See `.env.example` for every
+variable.
+
+**Calls.** Each call is bounded by its role's timeout, retries included, and
+returns `timeout` when it runs out. Retryable kinds (`timeout`, `rate_limit`,
+`overloaded`, `unavailable`) are retried up to `AI_RETRY_MAX_ATTEMPTS` with
+capped exponential backoff and full jitter, or the provider's `Retry-After`
+when longer; never when the caller cancelled or the deadline cannot fit
+another wait. Each provider has a client-side token bucket (`AI_RATE_LIMITS`).
+Streams are channels that are always closed; a failure before the first chunk
+is retried, one after it ends the stream with a terminal error and nothing is
+replayed.
+
+**Secrets.** Keys come only from the environment and are held in `ai.APIKey`,
+which prints, logs and marshals as `[REDACTED]`; provider messages are scrubbed
+of the key before they reach an error. Startup fails with the variable name
+(never the key) when a provider in use has none. Logs record provider, role,
+model, attempt, latency, tokens, cost, finish reason, error kind and
+`game_id`/`round_id`, never prompts or responses unless `AI_LOG_CONTENT=true`.
+
+**Judging.** When a round enters `Judging`, the engine hands it to
+`RoundJudge` on its own goroutine, outside the game's lock, so AI latency never
+delays a transition or the round timer. Rounds do not record their challenge
+yet, so judging currently logs `reason=rounds_have_no_challenge` and leaves
+the round in `Judging`; the full pipeline (execute, judge, complete) is tested
+with a fake challenge source. AI is off unless `AI_ENABLED=true`.
+
 ## Redis (live game state)
 
 PostgreSQL is the source of truth for games, settings and players. Redis
