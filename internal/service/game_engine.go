@@ -363,6 +363,15 @@ func (e *GameEngine) apply(
 		if err := repos.Games.UpdateProgress(ctx, gameID, from, to); err != nil {
 			return err
 		}
+		if to.RoundID != from.RoundID {
+			err := repos.Games.CreateRound(ctx, domain.Round{
+				ID: to.RoundID, GameID: gameID, Number: to.CurrentRound,
+				StartedAt: to.RoundStartedAt, Deadline: to.RoundDeadline,
+			})
+			if err != nil {
+				return err
+			}
+		}
 		game, err = repos.Games.GetByID(ctx, gameID)
 		return err
 	})

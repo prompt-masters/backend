@@ -41,4 +41,9 @@ type GameRepository interface {
 	// ListByPhase returns every game in the phase, with settings but without
 	// players.
 	ListByPhase(ctx context.Context, phase domain.GamePhase) ([]*domain.Game, error)
+
+	// CreateRound records a round as it starts.
+	CreateRound(ctx context.Context, round domain.Round) error
+	// GetRound returns domain.ErrNotFound for an unknown round.
+	GetRound(ctx context.Context, id uuid.UUID) (*domain.Round, error)
 }

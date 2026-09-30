@@ -42,6 +42,14 @@ type GamePlayer struct {
 	JoinedAt pgtype.Timestamptz
 }
 
+type GameRound struct {
+	ID          pgtype.UUID
+	GameID      pgtype.UUID
+	Number      int16
+	StartedAtMs int64
+	DeadlineMs  int64
+}
+
 type GameSetting struct {
 	GameID       pgtype.UUID
 	Rounds       int16
@@ -51,6 +59,27 @@ type GameSetting struct {
 	AiModel      string
 	MaxPlayers   int16
 	UpdatedAt    pgtype.Timestamptz
+}
+
+type PromptTest struct {
+	ID            pgtype.UUID
+	GameID        pgtype.UUID
+	RoundID       pgtype.UUID
+	PlayerID      pgtype.UUID
+	TestNumber    int32
+	Prompt        string
+	Output        pgtype.Text
+	Status        string
+	ErrorCode     pgtype.Text
+	Provider      pgtype.Text
+	Model         pgtype.Text
+	InputTokens   pgtype.Int4
+	OutputTokens  pgtype.Int4
+	CostUsd       pgtype.Float8
+	LatencyMs     pgtype.Int8
+	CreatedAtMs   int64
+	StartedAtMs   pgtype.Int8
+	CompletedAtMs pgtype.Int8
 }
 
 type RefreshToken struct {

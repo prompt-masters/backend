@@ -56,7 +56,11 @@ func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 	case errors.Is(err, domain.ErrInvalidTransition), errors.Is(err, domain.ErrStaleGameState):
 		WriteError(w, http.StatusConflict, "The game is not in a state that allows this.")
 	case errors.Is(err, domain.ErrRoundNotActive):
-		WriteError(w, http.StatusConflict, "The round is not accepting submissions.")
+		WriteErrorCode(w, http.StatusConflict, "ROUND_NOT_ACTIVE", "This round is not active.")
+	case errors.Is(err, domain.ErrTestInProgress):
+		WriteErrorCode(w, http.StatusConflict, "TEST_IN_PROGRESS", "Wait for your running test to finish.")
+	case errors.Is(err, domain.ErrAIUnavailable):
+		WriteErrorCode(w, http.StatusServiceUnavailable, "AI_UNAVAILABLE", "Prompt testing is not available.")
 	case errors.Is(err, domain.ErrAlreadySubmitted):
 		WriteError(w, http.StatusConflict, "You have already submitted this round.")
 	case errors.Is(err, domain.ErrStateNotFound):

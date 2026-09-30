@@ -26,6 +26,7 @@ const (
 	TypeTimerTick       Type = "timer_tick"
 	TypeOutputChunk     Type = "output_chunk"
 	TypeOutputComplete  Type = "output_complete"
+	TypeOutputError     Type = "output_error"
 	TypePlayerSubmitted Type = "player_submitted"
 	TypeRoundEnd        Type = "round_end"
 	TypeRoundResults    Type = "round_results"
@@ -215,23 +216,45 @@ type TimerTickPayload struct {
 
 func (TimerTickPayload) EventType() Type { return TypeTimerTick }
 
-// OutputChunkPayload streams one piece of a player's own test output, so it is
-// only ever sent to that player.
+// OutputChunkPayload streams one piece of a player's own prompt test output,
+// so it is only ever sent to that player. Seq starts at 1 and increases by
+// one per chunk of the test, for ordering and de-duplication.
 type OutputChunkPayload struct {
-	RoundNumber int    `json:"round_number"`
-	TestNumber  int    `json:"test_number"`
-	Chunk       string `json:"chunk"`
+	TestID     string `json:"test_id"`
+	TestNumber int    `json:"test_number"`
+	Seq        int    `json:"seq"`
+	Delta      string `json:"delta"`
 }
 
 func (OutputChunkPayload) EventType() Type { return TypeOutputChunk }
 
+type UsageInfo struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// OutputCompletePayload ends a successful test. Output is the stored final
+// output, not a reassembly of the chunks.
 type OutputCompletePayload struct {
-	RoundNumber int    `json:"round_number"`
-	TestNumber  int    `json:"test_number"`
-	Output      string `json:"output"`
+	TestID     string     `json:"test_id"`
+	TestNumber int        `json:"test_number"`
+	Status     string     `json:"status"`
+	Output     string     `json:"output"`
+	Usage      *UsageInfo `json:"usage"`
 }
 
 func (OutputCompletePayload) EventType() Type { return TypeOutputComplete }
+
+// OutputErrorPayload ends a failed or canceled test. Message is safe to show.
+type OutputErrorPayload struct {
+	TestID     string `json:"test_id"`
+	TestNumber int    `json:"test_number"`
+	Status     string `json:"status"`
+	ErrorCode  string `json:"error_code"`
+	Message    string `json:"message"`
+}
+
+func (OutputErrorPayload) EventType() Type { return TypeOutputError }
 
 // PlayerSubmittedPayload announces a submission without revealing any prompt,
 // which keeps judging blind.

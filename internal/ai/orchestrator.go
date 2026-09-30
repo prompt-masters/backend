@@ -119,15 +119,24 @@ func (o *Orchestrator) ExecuteStream(ctx context.Context, in ExecuteInput) (<-ch
 	return out, nil
 }
 
+// ExecutorTarget returns the provider and model Execute uses for a game's
+// ai_model setting; "" means the executor default.
+func (o *Orchestrator) ExecutorTarget(model string) (Target, error) {
+	if model == "" {
+		return o.cfg.Executor.Target, nil
+	}
+	target, ok := o.cfg.ExecutorModels[model]
+	if !ok {
+		return Target{}, &AIError{Kind: ErrKindInvalidRequest, Provider: o.cfg.Executor.Provider,
+			Message: fmt.Sprintf("no executor configured for model %q", model)}
+	}
+	return target, nil
+}
+
 func (o *Orchestrator) executorRequest(in ExecuteInput) (Target, Request, error) {
-	target := o.cfg.Executor.Target
-	if in.Model != "" {
-		mapped, ok := o.cfg.ExecutorModels[in.Model]
-		if !ok {
-			return Target{}, Request{}, &AIError{Kind: ErrKindInvalidRequest, Provider: target.Provider,
-				Message: fmt.Sprintf("no executor configured for model %q", in.Model)}
-		}
-		target = mapped
+	target, err := o.ExecutorTarget(in.Model)
+	if err != nil {
+		return Target{}, Request{}, err
 	}
 	if strings.TrimSpace(in.Prompt) == "" {
 		return Target{}, Request{}, &AIError{Kind: ErrKindInvalidRequest, Provider: target.Provider, Message: "prompt is empty"}

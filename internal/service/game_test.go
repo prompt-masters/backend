@@ -23,6 +23,8 @@ type fakeGameStore struct {
 	mu          sync.Mutex
 	games       map[uuid.UUID]*domain.Game
 	submissions map[uuid.UUID][]domain.Submission // by round ID
+	rounds      map[uuid.UUID]domain.Round
+	promptTests map[uuid.UUID]*domain.PromptTest
 	challenges  *fakeChallengeRepository
 	usernames   map[uuid.UUID]string
 	clock       time.Time
@@ -36,6 +38,8 @@ func newFakeGameStore() *fakeGameStore {
 	return &fakeGameStore{
 		games:       map[uuid.UUID]*domain.Game{},
 		submissions: map[uuid.UUID][]domain.Submission{},
+		rounds:      map[uuid.UUID]domain.Round{},
+		promptTests: map[uuid.UUID]*domain.PromptTest{},
 		usernames:   map[uuid.UUID]string{},
 		clock:       time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC),
 		challenges: &fakeChallengeRepository{challenges: []*domain.Challenge{
@@ -52,10 +56,17 @@ func (s *fakeGameStore) WithinTx(ctx context.Context, fn func(repository.TxRepos
 	for id, g := range s.games {
 		snapshot[id] = cloneGame(g)
 	}
-	submissions := maps.Clone(s.submissions)
-	repos := repository.TxRepositories{Games: fakeGameRepo{s}, Challenges: s.challenges, Submissions: fakeSubmissionRepo{s}}
+	submissions, rounds := maps.Clone(s.submissions), maps.Clone(s.rounds)
+	tests := make(map[uuid.UUID]*domain.PromptTest, len(s.promptTests))
+	for id, pt := range s.promptTests {
+		c := *pt
+		tests[id] = &c
+	}
+	repos := repository.TxRepositories{
+		Games: fakeGameRepo{s}, Challenges: s.challenges, Submissions: fakeSubmissionRepo{s}, PromptTests: fakePromptTestRepo{s},
+	}
 	if err := fn(repos); err != nil {
-		s.games, s.submissions = snapshot, submissions
+		s.games, s.submissions, s.rounds, s.promptTests = snapshot, submissions, rounds, tests
 		return err
 	}
 	return nil
@@ -231,6 +242,22 @@ func (r fakeGameRepo) ListByPhase(_ context.Context, phase domain.GamePhase) ([]
 		}
 	}
 	return out, nil
+}
+
+func (r fakeGameRepo) CreateRound(_ context.Context, round domain.Round) error {
+	if _, dup := r.s.rounds[round.ID]; dup {
+		return errors.New("duplicate round")
+	}
+	r.s.rounds[round.ID] = round
+	return nil
+}
+
+func (r fakeGameRepo) GetRound(_ context.Context, id uuid.UUID) (*domain.Round, error) {
+	round, ok := r.s.rounds[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return &round, nil
 }
 
 type fakeSubmissionRepo struct{ s *fakeGameStore }

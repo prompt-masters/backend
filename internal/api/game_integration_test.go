@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prompt-masters/backend/internal/ai"
+	"github.com/prompt-masters/backend/internal/ai/aitest"
 	"github.com/prompt-masters/backend/internal/api"
 	"github.com/prompt-masters/backend/internal/api/handler"
 	"github.com/prompt-masters/backend/internal/config"
@@ -42,6 +44,8 @@ type testAPI struct {
 	live *service.LiveStateService
 	logs *syncBuffer
 	hub  *ws.Hub
+	// promptAI plays every prompt test; it streams "Hel", "lo".
+	promptAI *aitest.Client
 }
 
 // newTestAPI builds the API without live state: lobby changes are not
@@ -126,9 +130,30 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 	gameService := service.NewGameService(transactor, service.MathRandom{}, syncer, events, engine)
 	websocketHandler := handler.NewWebSocketHandler(hub, live, jwtSecret, []string{"https://app.example.com"}, logger)
 
-	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, websocketHandler, nil, logger, jwtSecret).Routes())
+	promptAI := aitest.New("fake", aitest.Step{
+		Chunks:   []string{"Hel", "lo"},
+		Response: ai.Response{Usage: ai.Usage{InputTokens: 12, OutputTokens: 34}},
+	})
+	fake := ai.Target{Provider: "fake", Model: "fake-model"}
+	orchestrator, err := ai.NewOrchestrator(ai.Config{
+		Executor: ai.RoleConfig{Target: fake, Timeout: 10 * time.Second, MaxTokens: 100},
+		Judge:    ai.RoleConfig{Target: fake, Timeout: 10 * time.Second, MaxTokens: 100},
+		ExecutorModels: map[string]ai.Target{
+			string(domain.AIModelClaudeOpus5): fake, string(domain.AIModelClaudeSonnet5): fake, string(domain.AIModelClaudeHaiku4_5): fake,
+		},
+		Retry:     ai.RetryConfig{MaxAttempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+		Providers: map[string]ai.ProviderSettings{"fake": {APIKey: ai.NewAPIKey("sk-test")}},
+	}, map[string]ai.AIClient{"fake": promptAI}, logger)
+	if err != nil {
+		t.Fatalf("creating orchestrator: %v", err)
+	}
+	promptTests := service.NewPromptTestService(transactor, orchestrator, hub, service.SystemClock{}, logger,
+		config.PromptTestConfig{MaxPromptBytes: 1000, MaxConcurrent: 1, StaleAfter: 5 * time.Minute})
+	t.Cleanup(promptTests.Close)
+
+	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, promptTests, websocketHandler, nil, logger, jwtSecret).Routes())
 	t.Cleanup(server.Close)
-	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs, hub: hub}
+	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs, hub: hub, promptAI: promptAI}
 }
 
 // testHubConfig keeps deadlines generous: test clients idle between

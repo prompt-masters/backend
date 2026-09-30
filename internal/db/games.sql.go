@@ -58,6 +58,30 @@ func (q *Queries) CreateGame(ctx context.Context, arg CreateGameParams) (*Game, 
 	return &i, err
 }
 
+const CreateGameRound = `-- name: CreateGameRound :exec
+INSERT INTO game_rounds (id, game_id, number, started_at_ms, deadline_ms)
+VALUES ($1, $2, $3, $4, $5)
+`
+
+type CreateGameRoundParams struct {
+	ID          pgtype.UUID
+	GameID      pgtype.UUID
+	Number      int16
+	StartedAtMs int64
+	DeadlineMs  int64
+}
+
+func (q *Queries) CreateGameRound(ctx context.Context, arg CreateGameRoundParams) error {
+	_, err := q.db.Exec(ctx, CreateGameRound,
+		arg.ID,
+		arg.GameID,
+		arg.Number,
+		arg.StartedAtMs,
+		arg.DeadlineMs,
+	)
+	return err
+}
+
 const CreateGameSettings = `-- name: CreateGameSettings :exec
 INSERT INTO game_settings (game_id, rounds, time_per_round, difficulty, category, ai_model, max_players)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -167,6 +191,23 @@ func (q *Queries) GetGameProgress(ctx context.Context, id pgtype.UUID) (*GetGame
 		&i.RoundStartedAtMs,
 		&i.RoundDeadlineMs,
 		&i.Rounds,
+	)
+	return &i, err
+}
+
+const GetGameRound = `-- name: GetGameRound :one
+SELECT id, game_id, number, started_at_ms, deadline_ms FROM game_rounds WHERE id = $1
+`
+
+func (q *Queries) GetGameRound(ctx context.Context, id pgtype.UUID) (*GameRound, error) {
+	row := q.db.QueryRow(ctx, GetGameRound, id)
+	var i GameRound
+	err := row.Scan(
+		&i.ID,
+		&i.GameID,
+		&i.Number,
+		&i.StartedAtMs,
+		&i.DeadlineMs,
 	)
 	return &i, err
 }

@@ -175,6 +175,30 @@ func (r *GameRepository) ListByPhase(ctx context.Context, phase domain.GamePhase
 	return games, nil
 }
 
+func (r *GameRepository) CreateRound(ctx context.Context, round domain.Round) error {
+	return r.queries.CreateGameRound(ctx, db.CreateGameRoundParams{
+		ID:          pgUUID(round.ID),
+		GameID:      pgUUID(round.GameID),
+		Number:      int16(round.Number),
+		StartedAtMs: round.StartedAt.UnixMilli(),
+		DeadlineMs:  round.Deadline.UnixMilli(),
+	})
+}
+
+func (r *GameRepository) GetRound(ctx context.Context, id uuid.UUID) (*domain.Round, error) {
+	row, err := r.queries.GetGameRound(ctx, pgUUID(id))
+	if err != nil {
+		return nil, translateGetError(err)
+	}
+	return &domain.Round{
+		ID:        uuidFromPg(row.ID),
+		GameID:    uuidFromPg(row.GameID),
+		Number:    int(row.Number),
+		StartedAt: time.UnixMilli(row.StartedAtMs).UTC(),
+		Deadline:  time.UnixMilli(row.DeadlineMs).UTC(),
+	}, nil
+}
+
 func (r *GameRepository) withPlayers(ctx context.Context, g *domain.Game) (*domain.Game, error) {
 	rows, err := r.queries.ListGamePlayers(ctx, pgUUID(g.ID))
 	if err != nil {

@@ -23,6 +23,7 @@ func TestEventTypesMatchTheContract(t *testing.T) {
 		"timer_tick":       TimerTickPayload{},
 		"output_chunk":     OutputChunkPayload{},
 		"output_complete":  OutputCompletePayload{},
+		"output_error":     OutputErrorPayload{},
 		"player_submitted": PlayerSubmittedPayload{},
 		"round_end":        RoundEndPayload{},
 		"round_results":    RoundResultsPayload{},

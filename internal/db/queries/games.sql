@@ -101,3 +101,10 @@ FROM games g
 JOIN game_settings s ON s.game_id = g.id
 WHERE g.phase = $1
 ORDER BY g.id;
+
+-- name: CreateGameRound :exec
+INSERT INTO game_rounds (id, game_id, number, started_at_ms, deadline_ms)
+VALUES ($1, $2, $3, $4, $5);
+
+-- name: GetGameRound :one
+SELECT * FROM game_rounds WHERE id = $1;

@@ -13,20 +13,27 @@ import (
 type Querier interface {
 	AddGamePlayer(ctx context.Context, arg AddGamePlayerParams) error
 	CountRoundSubmissions(ctx context.Context, roundID pgtype.UUID) (int32, error)
+	CountUnfinishedPromptTests(ctx context.Context, arg CountUnfinishedPromptTestsParams) (int32, error)
 	// Returns no row when the room code is held by another active game.
 	CreateGame(ctx context.Context, arg CreateGameParams) (*Game, error)
+	CreateGameRound(ctx context.Context, arg CreateGameRoundParams) error
 	CreateGameSettings(ctx context.Context, arg CreateGameSettingsParams) error
+	CreatePromptTest(ctx context.Context, arg CreatePromptTestParams) (pgtype.UUID, error)
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) error
 	CreateRoundSubmission(ctx context.Context, arg CreateRoundSubmissionParams) error
 	CreateUser(ctx context.Context, arg CreateUserParams) (*User, error)
 	CreateVerificationToken(ctx context.Context, arg CreateVerificationTokenParams) (*VerificationToken, error)
 	DeleteExpiredTokens(ctx context.Context) error
 	DeleteVerificationToken(ctx context.Context, token string) error
+	// Tests left unfinished by a server that stopped mid-run.
+	FailStalePromptTests(ctx context.Context, arg FailStalePromptTestsParams) (int64, error)
+	FinishPromptTest(ctx context.Context, arg FinishPromptTestParams) (int64, error)
 	GetActiveGameIDByRoomCode(ctx context.Context, roomCode string) (pgtype.UUID, error)
 	GetActiveRefreshTokenUserID(ctx context.Context, tokenHash string) (pgtype.UUID, error)
 	GetChallengeByID(ctx context.Context, id pgtype.UUID) (*Challenge, error)
 	GetGameByID(ctx context.Context, id pgtype.UUID) (*GetGameByIDRow, error)
 	GetGameProgress(ctx context.Context, id pgtype.UUID) (*GetGameProgressRow, error)
+	GetGameRound(ctx context.Context, id pgtype.UUID) (*GameRound, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
@@ -35,12 +42,17 @@ type Querier interface {
 	ListGamePlayers(ctx context.Context, gameID pgtype.UUID) ([]*ListGamePlayersRow, error)
 	ListGamesByPhase(ctx context.Context, phase string) ([]*ListGamesByPhaseRow, error)
 	ListGamesByStatus(ctx context.Context, arg ListGamesByStatusParams) ([]*ListGamesByStatusRow, error)
+	ListPromptTests(ctx context.Context, arg ListPromptTestsParams) ([]*PromptTest, error)
 	ListRoundSubmissions(ctx context.Context, roundID pgtype.UUID) ([]*RoundSubmission, error)
 	// Row-locks the game so membership and status changes are serialized. Read
 	// the game in a later statement: in READ COMMITTED, anything else computed by
 	// this statement (such as a player count subquery) would use the snapshot from
 	// before the lock wait and miss changes committed by the previous lock holder.
 	LockGameByID(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
+	MarkPromptTestStreaming(ctx context.Context, arg MarkPromptTestStreamingParams) (int64, error)
+	// Callers hold the game row lock, which serializes allocation; the unique
+	// constraint is the safety net.
+	NextPromptTestNumber(ctx context.Context, arg NextPromptTestNumberParams) (int32, error)
 	RemoveGamePlayer(ctx context.Context, arg RemoveGamePlayerParams) (int64, error)
 	RevokeRefreshToken(ctx context.Context, tokenHash string) error
 	RotateRefreshToken(ctx context.Context, arg RotateRefreshTokenParams) (pgtype.UUID, error)

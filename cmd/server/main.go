@@ -100,6 +100,8 @@ func run(logger *log.Logger) error {
 	gameEvents := service.NewGameEvents(hub, logger, clock.Now)
 	gameEngine := service.NewGameEngine(transactor, clock, gameEvents, liveStateService, logger)
 	defer gameEngine.Close()
+	// Left nil while AI is disabled, so prompt tests answer 503.
+	var promptExecutor service.PromptExecutor
 	if cfg.AIEnabled {
 		// No client timeout: every AI call is bounded by its role's timeout
 		// through its context, which also covers streamed responses.
@@ -114,9 +116,15 @@ func run(logger *log.Logger) error {
 		// Rounds do not record their challenge yet, so there is no
 		// RoundChallenges source: judging logs and skips until there is.
 		gameEngine.SetJudge(service.NewRoundJudge(orchestrator, transactor, nil, gameEngine, logger))
+		promptExecutor = orchestrator
 		logger.Printf("ai enabled: executor=%s judge=%s", cfg.AI.Executor.Target, cfg.AI.Judge.Target)
 	} else {
-		logger.Printf("ai disabled (AI_ENABLED is not set): rounds are not judged")
+		logger.Printf("ai disabled (AI_ENABLED is not set): rounds are not judged and prompt tests are refused")
+	}
+	promptTestService := service.NewPromptTestService(transactor, promptExecutor, hub, clock, logger, cfg.PromptTests)
+	defer promptTestService.Close()
+	if err := promptTestService.Recover(ctx); err != nil {
+		return err
 	}
 	// Resume the rounds that were in play before the server stopped.
 	if err := gameEngine.Recover(ctx); err != nil {
@@ -132,7 +140,7 @@ func run(logger *log.Logger) error {
 		{Name: "postgres", Critical: true, Check: pool.Ping},
 		{Name: "redis", Check: func(ctx context.Context) error { return redisClient.Ping(ctx).Err() }},
 	}
-	server := api.NewServer(authService, challengeService, gameService, liveStateService, websocketHandler, healthChecks, logger, cfg.JWTSecret)
+	server := api.NewServer(authService, challengeService, gameService, liveStateService, promptTestService, websocketHandler, healthChecks, logger, cfg.JWTSecret)
 
 	s := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),

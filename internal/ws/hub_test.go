@@ -391,7 +391,7 @@ func TestHubTargetedSends(t *testing.T) {
 	bobClient := f.dial(gameID, bob, "bob")
 
 	// Both of Alice's tabs get her targeted event; Bob gets none.
-	f.hub.SendToUser(gameID, alice, mustEncode(t, OutputChunkPayload{RoundNumber: 1, TestNumber: 2, Chunk: "alice only"}))
+	f.hub.SendToUser(gameID, alice, mustEncode(t, OutputChunkPayload{TestID: "t1", TestNumber: 2, Seq: 1, Delta: "alice only"}))
 	for _, c := range []*client{aliceTab1, aliceTab2} {
 		env := c.next(time.Second)
 		if env.Type != TypeOutputChunk {

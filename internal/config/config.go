@@ -32,6 +32,10 @@ const (
 	defaultActiveGameTTL     = 2 * time.Hour
 	defaultEndedGameTTL      = 15 * time.Minute
 
+	defaultPromptTestMaxBytes      = 8 << 10
+	defaultPromptTestMaxConcurrent = 1
+	defaultPromptTestStaleAfter    = 5 * time.Minute
+
 	defaultAIProvider          = "anthropic"
 	defaultAIModel             = "claude-opus-5"
 	defaultAIExecutorTimeout   = 60 * time.Second
@@ -60,8 +64,28 @@ type Config struct {
 	WS              WSConfig
 	// AIEnabled turns on the AI layer; AI is only loaded and validated when
 	// it is set.
-	AIEnabled bool
-	AI        ai.Config
+	AIEnabled   bool
+	AI          ai.Config
+	PromptTests PromptTestConfig
+}
+
+// PromptTestConfig limits the prompt tests players run during a round.
+type PromptTestConfig struct {
+	// MaxPromptBytes caps a tested prompt.
+	MaxPromptBytes int
+	// MaxConcurrent is how many unfinished tests one player may have in a
+	// round.
+	MaxConcurrent int
+	// StaleAfter is when an unfinished test stops counting against the
+	// limit and is failed at start-up: its server must have stopped.
+	StaleAfter time.Duration
+}
+
+func (c PromptTestConfig) Validate() error {
+	if c.MaxPromptBytes <= 0 || c.MaxConcurrent <= 0 || c.StaleAfter <= 0 {
+		return errors.New("PROMPT_TEST_MAX_BYTES, PROMPT_TEST_MAX_CONCURRENT and PROMPT_TEST_STALE_AFTER must be positive")
+	}
+	return nil
 }
 
 // WSConfig configures the WebSocket hub and which browser origins may open a
@@ -118,6 +142,11 @@ func Load() (*Config, error) {
 			},
 			AllowedOrigins: envList("WS_ALLOWED_ORIGINS"),
 		},
+		PromptTests: PromptTestConfig{
+			MaxPromptBytes: envInt("PROMPT_TEST_MAX_BYTES", defaultPromptTestMaxBytes),
+			MaxConcurrent:  envInt("PROMPT_TEST_MAX_CONCURRENT", defaultPromptTestMaxConcurrent),
+			StaleAfter:     envDuration("PROMPT_TEST_STALE_AFTER", defaultPromptTestStaleAfter),
+		},
 	}
 
 	if cfg.Port == "" {
@@ -152,6 +181,9 @@ func Load() (*Config, error) {
 	}
 	if err := cfg.WS.Hub.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid WebSocket config: %w", err)
+	}
+	if err := cfg.PromptTests.Validate(); err != nil {
+		return nil, err
 	}
 	if cfg.AIEnabled = envBool("AI_ENABLED", false); cfg.AIEnabled {
 		if cfg.AI, err = loadAI(); err != nil {

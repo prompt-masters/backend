@@ -272,6 +272,8 @@ access token; no route accepts a user ID.
 | `DELETE` | `/api/v1/games/{id}/ready` | 204 | Unmark |
 | `GET` | `/api/v1/games/{id}/draft` | 200 | Your own draft; 404 if you have none |
 | `PUT` | `/api/v1/games/{id}/draft` | 200 | `{"content": "..."}`, up to 8 KB, `in_progress` games |
+| `POST` | `/api/v1/rounds/{id}/test` | 202 | Run your prompt; see [Prompt testing](#prompt-testing) |
+| `GET` | `/api/v1/rounds/{id}/tests` | 200 | Your own tests in the round, by `test_number` |
 
 Only players of the game get live state (403 otherwise). A player can never
 read another player's draft. 503 means Redis is unavailable; retry later.
@@ -331,8 +333,8 @@ Every message is `{"type": ..., "payload": ...}`.
 
 Server to client: `game_state`, `player_joined`, `player_left`, `player_ready`,
 `player_typing`, `round_start`, `timer_tick`, `output_chunk`,
-`output_complete`, `player_submitted`, `round_end`, `round_results`,
-`game_end`, `error`.
+`output_complete`, `output_error`, `player_submitted`, `round_end`,
+`round_results`, `game_end`, `error`.
 
 Client to server: `player_ready`, `prompt_typing`, `heartbeat`,
 `submit_prompt` (handled now), and `prompt_test` (answered with an
@@ -346,8 +348,8 @@ once the server's deadline has passed.
 Rules:
 
 - Broadcasts reach only the room of the game they belong to.
-- `error`, `output_chunk`, `output_complete` and a player's own draft are sent
-  to that one player, never broadcast. `player_submitted` never carries prompt
+- `error`, `output_chunk`, `output_complete`, `output_error` and a player's
+  own draft are sent to that one player (all their tabs), never broadcast. `player_submitted` never carries prompt
   text, so judging stays blind.
 - All timing (`round_start`, `timer_tick`, deadlines) comes from the server;
   the client never sets it. Round deadlines are stored in PostgreSQL by the
@@ -438,6 +440,52 @@ Every `game_state` (on connect, and after each transition) carries:
 `offset = server_time - client_now` on receipt and show
 `round_deadline - (client_now + offset)`. `round_end` (with `round_id` and
 `reason`: `all_submitted` or `time_expired`) precedes the `Judging` state.
+
+## Prompt testing
+
+During `RoundActive` a player can run their prompt and watch the output
+stream. Every attempt is stored in `prompt_tests` for efficiency scoring and
+replay.
+
+`POST /api/v1/rounds/{id}/test` with `{"prompt": "..."}` answers `202` with
+`{"data": {"test_id", "test_number", "status": "pending"}}` once the test is
+stored; the AI runs afterwards and streams over the WebSocket:
+
+```json
+{"type": "output_chunk",    "payload": {"test_id": "…", "test_number": 3, "seq": 12, "delta": "..."}}
+{"type": "output_complete", "payload": {"test_id": "…", "test_number": 3, "status": "completed",
+                                        "output": "<stored output>", "usage": {"input_tokens": 120, "output_tokens": 340}}}
+{"type": "output_error",    "payload": {"test_id": "…", "test_number": 3, "status": "failed",
+                                        "error_code": "TIMEOUT", "message": "The AI took too long to answer."}}
+```
+
+| Status | `error_code` | When |
+| --- | --- | --- |
+| 400 | — | Blank prompt, over `PROMPT_TEST_MAX_BYTES`, or not UTF-8 |
+| 403 | — | Not a player of the round's game |
+| 404 | — | Unknown round |
+| 409 | `ROUND_NOT_ACTIVE` | Not the current round, not `RoundActive`, or past the deadline |
+| 409 | `TEST_IN_PROGRESS` | `PROMPT_TEST_MAX_CONCURRENT` unfinished tests already |
+| 503 | `AI_UNAVAILABLE` | AI is disabled |
+
+- **Consistency:** the checks and the insert run in one transaction holding
+  the game's row lock, the same lock every engine transition takes, so a test
+  is never accepted for a round that has just ended. The AI call runs after
+  the commit, with no lock held.
+- **Numbering:** `test_number` starts at 1 per player and round and is
+  allocated under that lock (`MAX + 1`, backed by a unique constraint), so
+  numbers have no gaps or duplicates. Failed and canceled tests keep theirs.
+- **Lifecycle:** `pending` → `streaming` → `completed`, `failed` (the AI
+  error's kind, e.g. `TIMEOUT`, `RATE_LIMIT`; partial output is kept) or
+  `canceled` (`ROUND_ENDED` at the round deadline, `CANCELED` on shutdown).
+  Tests a stopped server left unfinished are failed as `INTERRUPTED` on start.
+  The row is written before `output_complete`/`output_error` is sent, so the
+  event carries what was stored.
+- **Privacy:** `GET .../tests` returns only the caller's own tests; the player
+  always comes from the access token, never from a query parameter.
+
+Rounds are recorded in `game_rounds` as they start, so a round keeps resolving
+to its game after the game moves on.
 
 ## AI layer
 
