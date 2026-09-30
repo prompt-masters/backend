@@ -23,6 +23,7 @@ func TestEventTypesMatchTheContract(t *testing.T) {
 		"timer_tick":       TimerTickPayload{},
 		"output_chunk":     OutputChunkPayload{},
 		"output_complete":  OutputCompletePayload{},
+		"output_error":     OutputErrorPayload{},
 		"player_submitted": PlayerSubmittedPayload{},
 		"round_end":        RoundEndPayload{},
 		"round_results":    RoundResultsPayload{},
@@ -147,9 +148,69 @@ func TestPlayerEventsFromGame(t *testing.T) {
 		t.Errorf("new_host_id = %q, want empty when hosting did not move", noChange.NewHostID)
 	}
 
-	state := GameStateFromGame(game)
+	state := GameStateFromGame(game, time.Now())
 	if state.Game.RoomCode != "123456" || len(state.Players) != 2 || state.Round != nil || state.YourDraft != nil {
 		t.Errorf("game_state from game = %+v", state)
+	}
+}
+
+func TestGameStateCarriesEngineStateOnTheWire(t *testing.T) {
+	now := time.UnixMilli(1759100000123).UTC()
+	roundID := uuid.New()
+	game := &domain.Game{ID: uuid.New(), RoomCode: "123456", Progress: domain.GameProgress{
+		Phase:          domain.GamePhaseRoundActive,
+		CurrentRound:   2,
+		TotalRounds:    5,
+		RoundID:        roundID,
+		RoundStartedAt: time.UnixMilli(1759100000000).UTC(),
+		RoundDeadline:  time.UnixMilli(1759100060000).UTC(),
+	}}
+
+	decode := func(p GameStatePayload) map[string]any {
+		t.Helper()
+		msg, err := Encode(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var env struct {
+			Type    Type           `json:"type"`
+			Payload map[string]any `json:"payload"`
+		}
+		if err := json.Unmarshal(msg.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		if env.Type != TypeGameState {
+			t.Fatalf("type = %q", env.Type)
+		}
+		return env.Payload
+	}
+
+	fromGame := decode(GameStateFromGame(game, now))
+	fromLive := decode(GameStateFrom(&domain.LiveGameState{
+		Lobby: domain.LobbyState{GameID: game.ID}, Progress: game.Progress, ServerTime: now,
+	}, false))
+	for name, got := range map[string]map[string]any{"from game": fromGame, "from live state": fromLive} {
+		want := map[string]any{
+			"state":            "RoundActive",
+			"current_round":    float64(2),
+			"total_rounds":     float64(5),
+			"round_id":         roundID.String(),
+			"round_started_at": float64(1759100000000),
+			"round_deadline":   float64(1759100060000),
+			"server_time":      float64(1759100000123),
+		}
+		for key, value := range want {
+			if got[key] != value {
+				t.Errorf("%s: %s = %v, want %v", name, key, got[key], value)
+			}
+		}
+	}
+
+	lobby := decode(GameStateFromGame(&domain.Game{Progress: domain.GameProgress{Phase: domain.GamePhaseLobby, TotalRounds: 5}}, now))
+	for _, key := range []string{"round_id", "round_started_at", "round_deadline"} {
+		if _, ok := lobby[key]; ok {
+			t.Errorf("lobby game_state has %s, want it omitted before the first round", key)
+		}
 	}
 }
 

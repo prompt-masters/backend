@@ -1,6 +1,8 @@
 package ws
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/prompt-masters/backend/internal/domain"
 )
@@ -46,6 +48,7 @@ func GameStateFrom(live *domain.LiveGameState, withDraft bool) GameStatePayload 
 			RemainingMs: live.RoundRemaining.Milliseconds(),
 		}
 	}
+	payload.setProgress(live.Progress, live.ServerTime)
 	if withDraft && live.Draft != nil {
 		payload.YourDraft = &DraftInfo{
 			Content:     live.Draft.Content,
@@ -57,8 +60,8 @@ func GameStateFrom(live *domain.LiveGameState, withDraft bool) GameStatePayload 
 }
 
 // GameStateFromGame builds a game_state payload from the database view of a
-// game, without any Redis-only data.
-func GameStateFromGame(game *domain.Game) GameStatePayload {
+// game, without any Redis-only data, stamped with the server time now.
+func GameStateFromGame(game *domain.Game, now time.Time) GameStatePayload {
 	players := make([]PlayerInfo, len(game.Players))
 	for i, p := range game.Players {
 		players[i] = PlayerInfo{
@@ -68,7 +71,7 @@ func GameStateFromGame(game *domain.Game) GameStatePayload {
 			JoinedAt: p.JoinedAt,
 		}
 	}
-	return GameStatePayload{
+	payload := GameStatePayload{
 		Game: GameInfo{
 			GameID:   game.ID.String(),
 			RoomCode: game.RoomCode,
@@ -77,6 +80,20 @@ func GameStateFromGame(game *domain.Game) GameStatePayload {
 			Settings: settingsInfo(game.Settings),
 		},
 		Players: players,
+	}
+	payload.setProgress(game.Progress, now)
+	return payload
+}
+
+func (p *GameStatePayload) setProgress(progress domain.GameProgress, now time.Time) {
+	p.State = string(progress.Phase)
+	p.CurrentRound = progress.CurrentRound
+	p.TotalRounds = progress.TotalRounds
+	p.ServerTime = now.UnixMilli()
+	if progress.RoundID != uuid.Nil {
+		p.RoundID = progress.RoundID.String()
+		p.RoundStartedAt = progress.RoundStartedAt.UnixMilli()
+		p.RoundDeadline = progress.RoundDeadline.UnixMilli()
 	}
 }
 

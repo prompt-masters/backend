@@ -25,8 +25,10 @@ func (t *Transactor) WithinTx(ctx context.Context, fn func(repos repository.TxRe
 	return pgx.BeginFunc(ctx, t.pool, func(tx pgx.Tx) error {
 		queries := db.New(tx)
 		return fn(repository.TxRepositories{
-			Games:      NewGameRepository(queries),
-			Challenges: NewChallengeRepository(queries),
+			Games:       NewGameRepository(queries),
+			Challenges:  NewChallengeRepository(queries),
+			Submissions: NewSubmissionRepository(queries),
+			PromptTests: NewPromptTestRepository(queries),
 		})
 	})
 }

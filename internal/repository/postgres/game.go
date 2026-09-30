@@ -3,17 +3,20 @@ package postgres
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/prompt-masters/backend/internal/db"
 	"github.com/prompt-masters/backend/internal/domain"
 )
 
 const (
-	pgUniqueViolation     = "23505"
-	gamePlayersPrimaryKey = "game_players_game_id_user_id_key"
+	pgUniqueViolation          = "23505"
+	gamePlayersPrimaryKey      = "game_players_game_id_user_id_key"
+	roundSubmissionsPrimaryKey = "round_submissions_round_id_user_id_key"
 )
 
 type GameRepository struct {
@@ -129,6 +132,73 @@ func (r *GameRepository) UpdateStatus(ctx context.Context, gameID uuid.UUID, sta
 	return r.queries.UpdateGameStatus(ctx, db.UpdateGameStatusParams{ID: pgUUID(gameID), Status: string(status)})
 }
 
+func (r *GameRepository) GetProgress(ctx context.Context, id uuid.UUID) (*domain.GameProgress, error) {
+	row, err := r.queries.GetGameProgress(ctx, pgUUID(id))
+	if err != nil {
+		return nil, translateGetError(err)
+	}
+	p := toDomainProgress(row.Phase, row.CurrentRound, row.RoundID, row.RoundStartedAtMs, row.RoundDeadlineMs, row.Rounds)
+	return &p, nil
+}
+
+func (r *GameRepository) UpdateProgress(ctx context.Context, gameID uuid.UUID, from, to domain.GameProgress) error {
+	n, err := r.queries.UpdateGameProgress(ctx, db.UpdateGameProgressParams{
+		ToPhase:          string(to.Phase),
+		ToStatus:         string(to.Phase.Status()),
+		CurrentRound:     int16(to.CurrentRound),
+		RoundID:          pgOptionalUUID(to.RoundID),
+		RoundStartedAtMs: pgUnixMilli(to.RoundStartedAt),
+		RoundDeadlineMs:  pgUnixMilli(to.RoundDeadline),
+		ID:               pgUUID(gameID),
+		FromPhase:        string(from.Phase),
+		FromStatus:       string(from.Phase.Status()),
+		FromRoundID:      pgOptionalUUID(from.RoundID),
+	})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return domain.ErrStaleGameState
+	}
+	return nil
+}
+
+func (r *GameRepository) ListByPhase(ctx context.Context, phase domain.GamePhase) ([]*domain.Game, error) {
+	rows, err := r.queries.ListGamesByPhase(ctx, string(phase))
+	if err != nil {
+		return nil, err
+	}
+	games := make([]*domain.Game, len(rows))
+	for i, row := range rows {
+		games[i] = toDomainGame(&row.Game, &row.GameSetting, 0)
+	}
+	return games, nil
+}
+
+func (r *GameRepository) CreateRound(ctx context.Context, round domain.Round) error {
+	return r.queries.CreateGameRound(ctx, db.CreateGameRoundParams{
+		ID:          pgUUID(round.ID),
+		GameID:      pgUUID(round.GameID),
+		Number:      int16(round.Number),
+		StartedAtMs: round.StartedAt.UnixMilli(),
+		DeadlineMs:  round.Deadline.UnixMilli(),
+	})
+}
+
+func (r *GameRepository) GetRound(ctx context.Context, id uuid.UUID) (*domain.Round, error) {
+	row, err := r.queries.GetGameRound(ctx, pgUUID(id))
+	if err != nil {
+		return nil, translateGetError(err)
+	}
+	return &domain.Round{
+		ID:        uuidFromPg(row.ID),
+		GameID:    uuidFromPg(row.GameID),
+		Number:    int(row.Number),
+		StartedAt: time.UnixMilli(row.StartedAtMs).UTC(),
+		Deadline:  time.UnixMilli(row.DeadlineMs).UTC(),
+	}, nil
+}
+
 func (r *GameRepository) withPlayers(ctx context.Context, g *domain.Game) (*domain.Game, error) {
 	rows, err := r.queries.ListGamePlayers(ctx, pgUUID(g.ID))
 	if err != nil {
@@ -168,6 +238,25 @@ func toDomainGame(g *db.Game, s *db.GameSetting, playerCount int32) *domain.Game
 			AIModel:             domain.AIModel(s.AiModel),
 			MaxPlayers:          int(s.MaxPlayers),
 		}
+		game.Progress = toDomainProgress(g.Phase, g.CurrentRound, g.RoundID, g.RoundStartedAtMs, g.RoundDeadlineMs, s.Rounds)
 	}
 	return game
+}
+
+func toDomainProgress(phase string, currentRound int16, roundID pgtype.UUID, startedAtMs, deadlineMs pgtype.Int8, rounds int16) domain.GameProgress {
+	p := domain.GameProgress{
+		Phase:        domain.GamePhase(phase),
+		CurrentRound: int(currentRound),
+		TotalRounds:  int(rounds),
+	}
+	if roundID.Valid {
+		p.RoundID = uuidFromPg(roundID)
+	}
+	if startedAtMs.Valid {
+		p.RoundStartedAt = time.UnixMilli(startedAtMs.Int64).UTC()
+	}
+	if deadlineMs.Valid {
+		p.RoundDeadline = time.UnixMilli(deadlineMs.Int64).UTC()
+	}
+	return p
 }

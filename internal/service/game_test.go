@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"maps"
 	"slices"
 	"sync"
@@ -18,20 +20,28 @@ import (
 // serialized by one mutex, standing in for the game row lock, and a failed
 // transaction restores the state it started from.
 type fakeGameStore struct {
-	mu         sync.Mutex
-	games      map[uuid.UUID]*domain.Game
-	challenges *fakeChallengeRepository
-	usernames  map[uuid.UUID]string
-	clock      time.Time
+	mu          sync.Mutex
+	games       map[uuid.UUID]*domain.Game
+	submissions map[uuid.UUID][]domain.Submission // by round ID
+	rounds      map[uuid.UUID]domain.Round
+	promptTests map[uuid.UUID]*domain.PromptTest
+	challenges  *fakeChallengeRepository
+	usernames   map[uuid.UUID]string
+	clock       time.Time
 	// addPlayerErr, when set, makes AddPlayer fail.
 	addPlayerErr error
+	// updates counts UpdateProgress calls.
+	updates int
 }
 
 func newFakeGameStore() *fakeGameStore {
 	return &fakeGameStore{
-		games:     map[uuid.UUID]*domain.Game{},
-		usernames: map[uuid.UUID]string{},
-		clock:     time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC),
+		games:       map[uuid.UUID]*domain.Game{},
+		submissions: map[uuid.UUID][]domain.Submission{},
+		rounds:      map[uuid.UUID]domain.Round{},
+		promptTests: map[uuid.UUID]*domain.PromptTest{},
+		usernames:   map[uuid.UUID]string{},
+		clock:       time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC),
 		challenges: &fakeChallengeRepository{challenges: []*domain.Challenge{
 			newChallenge("coding-medium", domain.CategoryCoding, domain.DifficultyMedium),
 		}},
@@ -46,17 +56,29 @@ func (s *fakeGameStore) WithinTx(ctx context.Context, fn func(repository.TxRepos
 	for id, g := range s.games {
 		snapshot[id] = cloneGame(g)
 	}
-	if err := fn(repository.TxRepositories{Games: fakeGameRepo{s}, Challenges: s.challenges}); err != nil {
-		s.games = snapshot
+	submissions, rounds := maps.Clone(s.submissions), maps.Clone(s.rounds)
+	tests := make(map[uuid.UUID]*domain.PromptTest, len(s.promptTests))
+	for id, pt := range s.promptTests {
+		c := *pt
+		tests[id] = &c
+	}
+	repos := repository.TxRepositories{
+		Games: fakeGameRepo{s}, Challenges: s.challenges, Submissions: fakeSubmissionRepo{s}, PromptTests: fakePromptTestRepo{s},
+	}
+	if err := fn(repos); err != nil {
+		s.games, s.submissions, s.rounds, s.promptTests = snapshot, submissions, rounds, tests
 		return err
 	}
 	return nil
 }
 
+// cloneGame copies g as the database would return it: the total number of
+// rounds comes from the settings.
 func cloneGame(g *domain.Game) *domain.Game {
 	c := *g
 	c.Players = slices.Clone(g.Players)
 	c.PlayerCount = len(c.Players)
+	c.Progress.TotalRounds = c.Settings.Rounds
 	return &c
 }
 
@@ -68,6 +90,14 @@ func (s *fakeGameStore) tick() time.Time {
 // seed stores a game directly, bypassing the service.
 func (s *fakeGameStore) seed(status domain.GameStatus, code string, settings domain.GameSettings, players ...uuid.UUID) *domain.Game {
 	g := &domain.Game{ID: uuid.New(), RoomCode: code, HostID: players[0], Status: status, Settings: settings}
+	switch status {
+	case domain.GameStatusFinished:
+		g.Progress.Phase = domain.GamePhaseGameOver
+	case domain.GameStatusInProgress:
+		g.Progress = domain.GameProgress{Phase: domain.GamePhaseJudging, CurrentRound: 1, RoundID: uuid.New()}
+	default:
+		g.Progress.Phase = domain.GamePhaseLobby
+	}
 	for _, p := range players {
 		g.Players = append(g.Players, domain.GamePlayer{UserID: p, Username: s.usernames[p], JoinedAt: s.tick()})
 	}
@@ -91,6 +121,7 @@ func (r fakeGameRepo) Create(_ context.Context, hostID uuid.UUID, code string) (
 		}
 	}
 	g := &domain.Game{ID: uuid.New(), RoomCode: code, HostID: hostID, Status: domain.GameStatusWaiting}
+	g.Progress.Phase = domain.GamePhaseLobby
 	r.s.games[g.ID] = g
 	return cloneGame(g), nil
 }
@@ -177,6 +208,78 @@ func (r fakeGameRepo) UpdateStatus(_ context.Context, gameID uuid.UUID, status d
 	return nil
 }
 
+func (r fakeGameRepo) GetProgress(ctx context.Context, id uuid.UUID) (*domain.GameProgress, error) {
+	g, err := r.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &g.Progress, nil
+}
+
+// UpdateProgress follows the same compare-and-set as the PostgreSQL query.
+func (r fakeGameRepo) UpdateProgress(_ context.Context, id uuid.UUID, from, to domain.GameProgress) error {
+	r.s.updates++
+	g, ok := r.s.games[id]
+	if !ok || g.Progress.Phase != from.Phase || g.Status != from.Phase.Status() || g.Progress.RoundID != from.RoundID {
+		return domain.ErrStaleGameState
+	}
+	g.Progress = to
+	g.Status = to.Phase.Status()
+	if g.Status == domain.GameStatusInProgress && g.StartedAt == nil {
+		started := r.s.tick()
+		g.StartedAt = &started
+	}
+	return nil
+}
+
+func (r fakeGameRepo) ListByPhase(_ context.Context, phase domain.GamePhase) ([]*domain.Game, error) {
+	out := []*domain.Game{}
+	for _, g := range r.s.games {
+		if g.Progress.Phase == phase {
+			c := cloneGame(g)
+			c.Players = nil
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (r fakeGameRepo) CreateRound(_ context.Context, round domain.Round) error {
+	if _, dup := r.s.rounds[round.ID]; dup {
+		return errors.New("duplicate round")
+	}
+	r.s.rounds[round.ID] = round
+	return nil
+}
+
+func (r fakeGameRepo) GetRound(_ context.Context, id uuid.UUID) (*domain.Round, error) {
+	round, ok := r.s.rounds[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return &round, nil
+}
+
+type fakeSubmissionRepo struct{ s *fakeGameStore }
+
+func (r fakeSubmissionRepo) Create(_ context.Context, sub domain.Submission) error {
+	subs := r.s.submissions[sub.RoundID]
+	if slices.ContainsFunc(subs, func(s domain.Submission) bool { return s.UserID == sub.UserID }) {
+		return domain.ErrAlreadySubmitted
+	}
+	// Copy on write, so a rolled-back transaction's snapshot is untouched.
+	r.s.submissions[sub.RoundID] = append(slices.Clone(subs), sub)
+	return nil
+}
+
+func (r fakeSubmissionRepo) CountByRound(_ context.Context, roundID uuid.UUID) (int, error) {
+	return len(r.s.submissions[roundID]), nil
+}
+
+func (r fakeSubmissionRepo) ListByRound(_ context.Context, roundID uuid.UUID) ([]domain.Submission, error) {
+	return slices.Clone(r.s.submissions[roundID]), nil
+}
+
 // sequenceRandom returns its values in order, then repeats the last one.
 type sequenceRandom struct {
 	values []int
@@ -239,6 +342,8 @@ type publishedEvent struct {
 	hostChanged bool
 	status      domain.GameStatus
 	playerCount int
+	progress    domain.GameProgress
+	reason      string
 }
 
 func (r *recordingEvents) record(e publishedEvent) {
@@ -256,7 +361,15 @@ func (r *recordingEvents) PlayerLeft(_ context.Context, game *domain.Game, userI
 }
 
 func (r *recordingEvents) GameUpdated(_ context.Context, game *domain.Game) {
-	r.record(publishedEvent{kind: "game_state", gameID: game.ID, status: game.Status, playerCount: game.PlayerCount})
+	r.record(publishedEvent{kind: "game_state", gameID: game.ID, status: game.Status, playerCount: game.PlayerCount, progress: game.Progress})
+}
+
+func (r *recordingEvents) PlayerSubmitted(_ context.Context, game *domain.Game, userID uuid.UUID, _ time.Time) {
+	r.record(publishedEvent{kind: "player_submitted", gameID: game.ID, userID: userID, status: game.Status, progress: game.Progress})
+}
+
+func (r *recordingEvents) RoundEnded(_ context.Context, game *domain.Game, reason string) {
+	r.record(publishedEvent{kind: "round_end", gameID: game.ID, status: game.Status, progress: game.Progress, reason: reason})
 }
 
 func (r *recordingEvents) events() []publishedEvent {
@@ -278,6 +391,8 @@ type gameServiceFixture struct {
 	random *sequenceRandom
 	live   *recordingSyncer
 	events *recordingEvents
+	clock  *fakeClock
+	engine *GameEngine
 	svc    *GameService
 }
 
@@ -287,8 +402,10 @@ func newGameServiceFixture() *gameServiceFixture {
 		random: &sequenceRandom{values: []int{482913}},
 		live:   &recordingSyncer{},
 		events: &recordingEvents{},
+		clock:  newFakeClock(time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)),
 	}
-	f.svc = NewGameService(f.store, f.random, f.live, f.events)
+	f.engine = NewGameEngine(f.store, f.clock, f.events, f.live, log.New(io.Discard, "", 0))
+	f.svc = NewGameService(f.store, f.random, f.live, f.events, f.engine)
 	return f
 }
 

@@ -26,6 +26,7 @@ const (
 	TypeTimerTick       Type = "timer_tick"
 	TypeOutputChunk     Type = "output_chunk"
 	TypeOutputComplete  Type = "output_complete"
+	TypeOutputError     Type = "output_error"
 	TypePlayerSubmitted Type = "player_submitted"
 	TypeRoundEnd        Type = "round_end"
 	TypeRoundResults    Type = "round_results"
@@ -141,6 +142,20 @@ type GameStatePayload struct {
 	// Rebuilt reports state rebuilt from the database because live state was
 	// missing.
 	Rebuilt bool `json:"rebuilt"`
+
+	// The game engine's state, always read from the database. Timestamps are
+	// UTC Unix milliseconds. A client renders the countdown as
+	// round_deadline - (client_now + server_time - client_receive_time); a
+	// reconnect gets the stored deadline, so a refresh never resets it.
+	State        string `json:"state"`
+	CurrentRound int    `json:"current_round"`
+	TotalRounds  int    `json:"total_rounds"`
+	// RoundID, RoundStartedAt and RoundDeadline describe the current or last
+	// round and are omitted before the first one.
+	RoundID        string `json:"round_id,omitempty"`
+	RoundStartedAt int64  `json:"round_started_at,omitempty"`
+	RoundDeadline  int64  `json:"round_deadline,omitempty"`
+	ServerTime     int64  `json:"server_time"`
 }
 
 func (GameStatePayload) EventType() Type { return TypeGameState }
@@ -201,23 +216,45 @@ type TimerTickPayload struct {
 
 func (TimerTickPayload) EventType() Type { return TypeTimerTick }
 
-// OutputChunkPayload streams one piece of a player's own test output, so it is
-// only ever sent to that player.
+// OutputChunkPayload streams one piece of a player's own prompt test output,
+// so it is only ever sent to that player. Seq starts at 1 and increases by
+// one per chunk of the test, for ordering and de-duplication.
 type OutputChunkPayload struct {
-	RoundNumber int    `json:"round_number"`
-	TestNumber  int    `json:"test_number"`
-	Chunk       string `json:"chunk"`
+	TestID     string `json:"test_id"`
+	TestNumber int    `json:"test_number"`
+	Seq        int    `json:"seq"`
+	Delta      string `json:"delta"`
 }
 
 func (OutputChunkPayload) EventType() Type { return TypeOutputChunk }
 
+type UsageInfo struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// OutputCompletePayload ends a successful test. Output is the stored final
+// output, not a reassembly of the chunks.
 type OutputCompletePayload struct {
-	RoundNumber int    `json:"round_number"`
-	TestNumber  int    `json:"test_number"`
-	Output      string `json:"output"`
+	TestID     string     `json:"test_id"`
+	TestNumber int        `json:"test_number"`
+	Status     string     `json:"status"`
+	Output     string     `json:"output"`
+	Usage      *UsageInfo `json:"usage"`
 }
 
 func (OutputCompletePayload) EventType() Type { return TypeOutputComplete }
+
+// OutputErrorPayload ends a failed or canceled test. Message is safe to show.
+type OutputErrorPayload struct {
+	TestID     string `json:"test_id"`
+	TestNumber int    `json:"test_number"`
+	Status     string `json:"status"`
+	ErrorCode  string `json:"error_code"`
+	Message    string `json:"message"`
+}
+
+func (OutputErrorPayload) EventType() Type { return TypeOutputError }
 
 // PlayerSubmittedPayload announces a submission without revealing any prompt,
 // which keeps judging blind.
@@ -301,8 +338,11 @@ type ClientPromptTest struct {
 	Prompt string `json:"prompt"`
 }
 
+// ClientSubmitPrompt is a player's final prompt for the round. RoundID is
+// optional; when set, a submission meant for an earlier round is refused.
 type ClientSubmitPrompt struct {
-	Prompt string `json:"prompt"`
+	Prompt  string `json:"prompt"`
+	RoundID string `json:"round_id,omitempty"`
 }
 
 // Inbound is a decoded client message handed to a Router. UserID comes from

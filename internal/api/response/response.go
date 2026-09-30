@@ -18,3 +18,8 @@ func WriteJSON(w http.ResponseWriter, status int, data Envelope) error {
 func WriteError(w http.ResponseWriter, status int, msg string) {
 	WriteJSON(w, status, Envelope{"error": msg})
 }
+
+// WriteErrorCode adds a stable, machine-readable error_code to the error.
+func WriteErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	WriteJSON(w, status, Envelope{"error": msg, "error_code": code})
+}
