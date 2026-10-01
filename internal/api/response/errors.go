@@ -62,7 +62,13 @@ func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 	case errors.Is(err, domain.ErrAIUnavailable):
 		WriteErrorCode(w, http.StatusServiceUnavailable, "AI_UNAVAILABLE", "Prompt testing is not available.")
 	case errors.Is(err, domain.ErrAlreadySubmitted):
-		WriteError(w, http.StatusConflict, "You have already submitted this round.")
+		WriteErrorCode(w, http.StatusConflict, "ALREADY_SUBMITTED", "You have already submitted this round.")
+	case errors.Is(err, domain.ErrInvalidTest):
+		WriteErrorCode(w, http.StatusBadRequest, "INVALID_TEST", "Submit one of your completed tests from this round.")
+	case errors.Is(err, domain.ErrResultsNotReady):
+		WriteErrorCode(w, http.StatusConflict, "RESULTS_NOT_READY", "This round's results are not published yet.")
+	case errors.Is(err, domain.ErrJudgingNotFailed):
+		WriteErrorCode(w, http.StatusConflict, "JUDGING_NOT_FAILED", "This round's judging has not failed.")
 	case errors.Is(err, domain.ErrStateNotFound):
 		WriteError(w, http.StatusNotFound, "The requested live state was not found.")
 	case errors.Is(err, domain.ErrStateUnavailable):

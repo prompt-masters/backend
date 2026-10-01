@@ -137,7 +137,7 @@ func (r *GameRepository) GetProgress(ctx context.Context, id uuid.UUID) (*domain
 	if err != nil {
 		return nil, translateGetError(err)
 	}
-	p := toDomainProgress(row.Phase, row.CurrentRound, row.RoundID, row.RoundStartedAtMs, row.RoundDeadlineMs, row.Rounds)
+	p := toDomainProgress(row.Phase, row.CurrentRound, row.RoundID, row.RoundStartedAtMs, row.RoundDeadlineMs, row.RoundChallengeID, row.Rounds)
 	return &p, nil
 }
 
@@ -149,6 +149,7 @@ func (r *GameRepository) UpdateProgress(ctx context.Context, gameID uuid.UUID, f
 		RoundID:          pgOptionalUUID(to.RoundID),
 		RoundStartedAtMs: pgUnixMilli(to.RoundStartedAt),
 		RoundDeadlineMs:  pgUnixMilli(to.RoundDeadline),
+		RoundChallengeID: pgOptionalUUID(to.ChallengeID),
 		ID:               pgUUID(gameID),
 		FromPhase:        string(from.Phase),
 		FromStatus:       string(from.Phase.Status()),
@@ -182,7 +183,20 @@ func (r *GameRepository) CreateRound(ctx context.Context, round domain.Round) er
 		Number:      int16(round.Number),
 		StartedAtMs: round.StartedAt.UnixMilli(),
 		DeadlineMs:  round.Deadline.UnixMilli(),
+		ChallengeID: pgOptionalUUID(round.ChallengeID),
 	})
+}
+
+func (r *GameRepository) ListChallengeIDs(ctx context.Context, gameID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := r.queries.ListGameChallengeIDs(ctx, pgUUID(gameID))
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uuid.UUID, len(rows))
+	for i, id := range rows {
+		ids[i] = uuidFromPg(id)
+	}
+	return ids, nil
 }
 
 func (r *GameRepository) GetRound(ctx context.Context, id uuid.UUID) (*domain.Round, error) {
@@ -191,11 +205,12 @@ func (r *GameRepository) GetRound(ctx context.Context, id uuid.UUID) (*domain.Ro
 		return nil, translateGetError(err)
 	}
 	return &domain.Round{
-		ID:        uuidFromPg(row.ID),
-		GameID:    uuidFromPg(row.GameID),
-		Number:    int(row.Number),
-		StartedAt: time.UnixMilli(row.StartedAtMs).UTC(),
-		Deadline:  time.UnixMilli(row.DeadlineMs).UTC(),
+		ID:          uuidFromPg(row.ID),
+		GameID:      uuidFromPg(row.GameID),
+		Number:      int(row.Number),
+		ChallengeID: uuidFromPg(row.ChallengeID),
+		StartedAt:   time.UnixMilli(row.StartedAtMs).UTC(),
+		Deadline:    time.UnixMilli(row.DeadlineMs).UTC(),
 	}, nil
 }
 
@@ -238,12 +253,12 @@ func toDomainGame(g *db.Game, s *db.GameSetting, playerCount int32) *domain.Game
 			AIModel:             domain.AIModel(s.AiModel),
 			MaxPlayers:          int(s.MaxPlayers),
 		}
-		game.Progress = toDomainProgress(g.Phase, g.CurrentRound, g.RoundID, g.RoundStartedAtMs, g.RoundDeadlineMs, s.Rounds)
+		game.Progress = toDomainProgress(g.Phase, g.CurrentRound, g.RoundID, g.RoundStartedAtMs, g.RoundDeadlineMs, g.RoundChallengeID, s.Rounds)
 	}
 	return game
 }
 
-func toDomainProgress(phase string, currentRound int16, roundID pgtype.UUID, startedAtMs, deadlineMs pgtype.Int8, rounds int16) domain.GameProgress {
+func toDomainProgress(phase string, currentRound int16, roundID pgtype.UUID, startedAtMs, deadlineMs pgtype.Int8, challengeID pgtype.UUID, rounds int16) domain.GameProgress {
 	p := domain.GameProgress{
 		Phase:        domain.GamePhase(phase),
 		CurrentRound: int(currentRound),
@@ -251,6 +266,9 @@ func toDomainProgress(phase string, currentRound int16, roundID pgtype.UUID, sta
 	}
 	if roundID.Valid {
 		p.RoundID = uuidFromPg(roundID)
+	}
+	if challengeID.Valid {
+		p.ChallengeID = uuidFromPg(challengeID)
 	}
 	if startedAtMs.Valid {
 		p.RoundStartedAt = time.UnixMilli(startedAtMs.Int64).UTC()

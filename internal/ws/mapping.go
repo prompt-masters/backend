@@ -49,6 +49,10 @@ func GameStateFrom(live *domain.LiveGameState, withDraft bool) GameStatePayload 
 		}
 	}
 	payload.setProgress(live.Progress, live.ServerTime)
+	if live.Results != nil {
+		results := RoundResultsFrom(*live.Results)
+		payload.RoundResults = &results
+	}
 	if withDraft && live.Draft != nil {
 		payload.YourDraft = &DraftInfo{
 			Content:     live.Draft.Content,
@@ -90,6 +94,9 @@ func (p *GameStatePayload) setProgress(progress domain.GameProgress, now time.Ti
 	p.CurrentRound = progress.CurrentRound
 	p.TotalRounds = progress.TotalRounds
 	p.ServerTime = now.UnixMilli()
+	if progress.ChallengeID != uuid.Nil {
+		p.ChallengeID = progress.ChallengeID.String()
+	}
 	if progress.RoundID != uuid.Nil {
 		p.RoundID = progress.RoundID.String()
 		p.RoundStartedAt = progress.RoundStartedAt.UnixMilli()
@@ -152,4 +159,36 @@ func settingsInfo(s domain.GameSettings) SettingsInfo {
 		AIModel:      string(s.AIModel),
 		MaxPlayers:   s.MaxPlayers,
 	}
+}
+
+// RoundResultsFrom maps a round's published results.
+func RoundResultsFrom(r domain.RoundResults) RoundResultsPayload {
+	entries := make([]RoundResultEntry, len(r.Results))
+	for i, res := range r.Results {
+		e := RoundResultEntry{
+			Rank:        res.Rank,
+			PlayerID:    res.PlayerID.String(),
+			DisplayName: res.DisplayName,
+			Prompt:      res.Prompt,
+			Output:      res.Output,
+			Scores: ScoresInfo{
+				Accuracy:   res.Components.Accuracy.Float(),
+				Simplicity: res.Components.Simplicity.Float(),
+				Creativity: res.Components.Creativity.Float(),
+				Adherence:  res.Components.Adherence.Float(),
+				Efficiency: res.Components.Efficiency.Float(),
+				Total:      res.Total.Float(),
+			},
+			PromptLength: res.PromptLength,
+			TestCount:    res.TestCount,
+			Source:       string(res.Source),
+			Rationale:    res.Rationale,
+			NoSubmission: res.NoSubmission,
+		}
+		if !res.NoSubmission {
+			e.SubmissionID = res.SubmissionID.String()
+		}
+		entries[i] = e
+	}
+	return RoundResultsPayload{RoundID: r.RoundID.String(), Round: r.Number, Results: entries}
 }

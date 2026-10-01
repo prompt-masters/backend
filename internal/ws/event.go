@@ -30,6 +30,7 @@ const (
 	TypePlayerSubmitted Type = "player_submitted"
 	TypeRoundEnd        Type = "round_end"
 	TypeRoundResults    Type = "round_results"
+	TypeJudgingFailed   Type = "judging_failed"
 	TypeGameEnd         Type = "game_end"
 	TypeError           Type = "error"
 )
@@ -156,6 +157,12 @@ type GameStatePayload struct {
 	RoundStartedAt int64  `json:"round_started_at,omitempty"`
 	RoundDeadline  int64  `json:"round_deadline,omitempty"`
 	ServerTime     int64  `json:"server_time"`
+	// ChallengeID is the current round's challenge; its details are at
+	// GET /api/v1/challenges/{id}.
+	ChallengeID string `json:"challenge_id,omitempty"`
+	// RoundResults are the last round's published results, sent while the
+	// game shows Results or is over, so a reconnect sees what the room saw.
+	RoundResults *RoundResultsPayload `json:"round_results,omitempty"`
 }
 
 func (GameStatePayload) EventType() Type { return TypeGameState }
@@ -256,12 +263,13 @@ type OutputErrorPayload struct {
 
 func (OutputErrorPayload) EventType() Type { return TypeOutputError }
 
-// PlayerSubmittedPayload announces a submission without revealing any prompt,
-// which keeps judging blind.
+// PlayerSubmittedPayload announces a submission by count only: no prompt,
+// output or score of another player is ever sent before results.
 type PlayerSubmittedPayload struct {
-	UserID      string    `json:"user_id"`
-	RoundNumber int       `json:"round_number"`
-	SubmittedAt time.Time `json:"submitted_at"`
+	PlayerID       string `json:"player_id"`
+	RoundID        string `json:"round_id"`
+	SubmittedCount int    `json:"submitted_count"`
+	TotalPlayers   int    `json:"total_players"`
 }
 
 func (PlayerSubmittedPayload) EventType() Type { return TypePlayerSubmitted }
@@ -275,30 +283,40 @@ type RoundEndPayload struct {
 
 func (RoundEndPayload) EventType() Type { return TypeRoundEnd }
 
-type ScoreInfo struct {
-	Accuracy            float64 `json:"accuracy"`
-	Simplicity          float64 `json:"simplicity"`
-	Creativity          float64 `json:"creativity"`
-	ConstraintAdherence float64 `json:"constraint_adherence"`
-	EfficiencyBonus     float64 `json:"efficiency_bonus"`
-	Total               float64 `json:"total"`
+// ScoresInfo are a submission's scores on a 0-10 scale, to two decimals.
+type ScoresInfo struct {
+	Accuracy   float64 `json:"accuracy"`
+	Simplicity float64 `json:"simplicity"`
+	Creativity float64 `json:"creativity"`
+	Adherence  float64 `json:"adherence"`
+	Efficiency float64 `json:"efficiency"`
+	Total      float64 `json:"total"`
 }
 
-// RoundResultPayloadEntry is one player's result, released only once judging
-// has finished.
-type RoundResultPayloadEntry struct {
-	UserID   string    `json:"user_id"`
-	Username string    `json:"username"`
-	Rank     int       `json:"rank"`
-	Prompt   string    `json:"prompt"`
-	Output   string    `json:"output"`
-	Score    ScoreInfo `json:"score"`
-	Feedback string    `json:"feedback,omitempty"`
+// RoundResultEntry is one player's result. It is the first moment another
+// player's prompt and output are sent.
+type RoundResultEntry struct {
+	Rank         int        `json:"rank"`
+	PlayerID     string     `json:"player_id"`
+	DisplayName  string     `json:"display_name"`
+	SubmissionID string     `json:"submission_id,omitempty"`
+	Prompt       string     `json:"prompt"`
+	Output       string     `json:"output"`
+	Scores       ScoresInfo `json:"scores"`
+	PromptLength int        `json:"prompt_length"`
+	TestCount    int        `json:"test_count"`
+	Source       string     `json:"source,omitempty"`
+	Rationale    string     `json:"rationale,omitempty"`
+	// NoSubmission marks a player who submitted nothing: zero scores, last.
+	NoSubmission bool `json:"no_submission"`
 }
 
+// RoundResultsPayload is broadcast once a round's scores are committed, best
+// rank first.
 type RoundResultsPayload struct {
-	RoundNumber int                       `json:"round_number"`
-	Results     []RoundResultPayloadEntry `json:"results"`
+	RoundID string             `json:"round_id"`
+	Round   int                `json:"round"`
+	Results []RoundResultEntry `json:"results"`
 }
 
 func (RoundResultsPayload) EventType() Type { return TypeRoundResults }
@@ -317,6 +335,15 @@ type GameEndPayload struct {
 }
 
 func (GameEndPayload) EventType() Type { return TypeGameEnd }
+
+// JudgingFailedPayload reports that judging a round failed and the game is
+// waiting in Judging; retryable says a retry may succeed.
+type JudgingFailedPayload struct {
+	RoundID   string `json:"round_id"`
+	Retryable bool   `json:"retryable"`
+}
+
+func (JudgingFailedPayload) EventType() Type { return TypeJudgingFailed }
 
 // ErrorPayload is always sent to a single connection.
 type ErrorPayload struct {
@@ -338,11 +365,11 @@ type ClientPromptTest struct {
 	Prompt string `json:"prompt"`
 }
 
-// ClientSubmitPrompt is a player's final prompt for the round. RoundID is
-// optional; when set, a submission meant for an earlier round is refused.
+// ClientSubmitPrompt makes one of the player's completed prompt tests their
+// final submission for the round.
 type ClientSubmitPrompt struct {
-	Prompt  string `json:"prompt"`
-	RoundID string `json:"round_id,omitempty"`
+	RoundID string `json:"round_id"`
+	TestID  string `json:"test_id"`
 }
 
 // Inbound is a decoded client message handed to a Router. UserID comes from

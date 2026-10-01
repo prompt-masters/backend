@@ -29,4 +29,11 @@ type PromptTestRepository interface {
 	// FailStale fails every unfinished test created before before, returning
 	// how many there were.
 	FailStale(ctx context.Context, before, now time.Time) (int64, error)
+	// Get returns domain.ErrNotFound for an unknown test.
+	Get(ctx context.Context, id uuid.UUID) (*domain.PromptTest, error)
+	// Count counts the player's tests in the round, whatever their status.
+	Count(ctx context.Context, roundID, playerID uuid.UUID) (int, error)
+	// LastCompleted returns the player's completed test with the highest
+	// number, or domain.ErrNotFound.
+	LastCompleted(ctx context.Context, roundID, playerID uuid.UUID) (*domain.PromptTest, error)
 }

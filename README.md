@@ -274,6 +274,10 @@ access token; no route accepts a user ID.
 | `PUT` | `/api/v1/games/{id}/draft` | 200 | `{"content": "..."}`, up to 8 KB, `in_progress` games |
 | `POST` | `/api/v1/rounds/{id}/test` | 202 | Run your prompt; see [Prompt testing](#prompt-testing) |
 | `GET` | `/api/v1/rounds/{id}/tests` | 200 | Your own tests in the round, by `test_number` |
+| `POST` | `/api/v1/rounds/{id}/submit` | 201 / 200 | `{"test_id": "..."}`: your final submission (200 for a repeat) |
+| `GET` | `/api/v1/submissions/{id}` | 200 | Yours any time; others' once the round's results are out |
+| `GET` | `/api/v1/submissions/{id}/score` | 200 | Scores, rank and rationale once results are out |
+| `POST` | `/api/v1/rounds/{id}/judge/retry` | 202 | Host only, after judging failed |
 
 Only players of the game get live state (403 otherwise). A player can never
 read another player's draft. 503 means Redis is unavailable; retry later.
@@ -334,23 +338,24 @@ Every message is `{"type": ..., "payload": ...}`.
 Server to client: `game_state`, `player_joined`, `player_left`, `player_ready`,
 `player_typing`, `round_start`, `timer_tick`, `output_chunk`,
 `output_complete`, `output_error`, `player_submitted`, `round_end`,
-`round_results`, `game_end`, `error`.
+`round_results`, `judging_failed`, `game_end`, `error`.
 
 Client to server: `player_ready`, `prompt_typing`, `heartbeat`,
 `submit_prompt` (handled now), and `prompt_test` (answered with an
 `unsupported_event` error until the prompt testing service lands).
 
-`submit_prompt` is `{"prompt": "...", "round_id": "..."}`; `round_id` is
-optional and, when given, must be the round in play. A player submits once
-per round. Submissions are refused (`not_allowed`) outside `RoundActive` or
-once the server's deadline has passed.
+`submit_prompt` is `{"round_id": "...", "test_id": "..."}`, the same final
+submission as `POST /api/v1/rounds/{id}/submit` (see
+[Submissions and scoring](#submissions-and-scoring)).
 
 Rules:
 
 - Broadcasts reach only the room of the game they belong to.
 - `error`, `output_chunk`, `output_complete`, `output_error` and a player's
-  own draft are sent to that one player (all their tabs), never broadcast. `player_submitted` never carries prompt
-  text, so judging stays blind.
+  own draft are sent to that one player (all their tabs), never broadcast.
+- Before `round_results`, no event carries another player's prompt, output,
+  test or score: `player_submitted` is `{player_id, round_id,
+  submitted_count, total_players}` only.
 - All timing (`round_start`, `timer_tick`, deadlines) comes from the server;
   the client never sets it. Round deadlines are stored in PostgreSQL by the
   game engine.
@@ -403,9 +408,9 @@ tested without a database, sockets or real time.
 `RoundActive`/`Judging`/`Results` are `in_progress`, `GameOver` is
 `finished`. A cancelled game keeps its phase and never moves again.
 
-`judgeCompleted` and `nextRound`/`finalRound` are exposed as
-`GameEngine.CompleteJudging` and `GameEngine.Advance` for the judging service;
-nothing calls them yet, so a live game currently stops in `Judging`.
+`judgeCompleted` fires once the judging job has committed a round's scores,
+and `nextRound`/`finalRound` fire from a server timer `RESULTS_DURATION` after
+`Results` begins (re-armed on restart).
 
 ### Timing and consistency
 
@@ -487,6 +492,80 @@ stored; the AI runs afterwards and streams over the WebSocket:
 Rounds are recorded in `game_rounds` as they start, so a round keeps resolving
 to its game after the game moves on.
 
+## Submissions and scoring
+
+Each round is played on a challenge picked when it starts (the game's
+category and difficulty, avoiding repeats while any remain);
+`game_state.challenge_id` names it.
+
+### Final submission
+
+`POST /api/v1/rounds/{id}/submit` with `{"test_id": "..."}` makes one of your
+completed prompt tests your final entry. Submissions are stored in
+`submissions` as a snapshot of the test's prompt and output, locked when
+written: there is no update path, and a database trigger refuses any UPDATE.
+
+| Status | `error_code` | When |
+| --- | --- | --- |
+| 201 | — | Submitted |
+| 200 | — | Same `test_id` again: the existing submission |
+| 400 | `INVALID_TEST` | Not one of your completed tests in this round |
+| 403 | — | Not a player |
+| 409 | `ROUND_NOT_ACTIVE` | Not the current round, or the deadline has passed |
+| 409 | `ALREADY_SUBMITTED` | You submitted another test |
+
+`prompt_length` is the Unicode code points of the trimmed prompt;
+`test_count` is your prompt tests in the round when you submitted, failed and
+canceled ones included. The last submission fires `allSubmitted`.
+
+When the timer ends a round, every player without a submission gets their
+**last completed test** submitted for them (`source: "auto"`), in the same
+transaction, so it is committed before judging reads submissions. A player
+with no completed test gets no submission and a zero score marked
+`no_submission`. `UNIQUE (round_id, player_id)` with `ON CONFLICT DO NOTHING`
+makes a manual submission racing the deadline the only one.
+
+### Judging
+
+- **Once per round:** a worker judges only after claiming the round's
+  `judging_runs` row (new, failed, or running for longer than
+  `JUDGE_STALE_AFTER`), and writes all scores in the transaction that
+  completes its own attempt. Scores are `UNIQUE (round_id, player_id)`. A
+  duplicate worker, instance or retry finds the run held or done.
+- **Anonymous:** submissions get labels A, B, C… in a fresh random order. The
+  judge receives only the challenge, its rubric and each label's prompt and
+  output: no player, username, submission ID or timing. Players can still name
+  themselves inside their own prompt text; that is not filtered.
+- **Failure:** the whole judge call is retried up to `JUDGE_MAX_RUNS` times
+  (backoff from `JUDGE_RETRY_DELAY`) on retryable errors and invalid output.
+  Then the run is `failed`, the round stays in `Judging`, the room gets
+  `judging_failed`, and the host can call
+  `POST /api/v1/rounds/{id}/judge/retry`. No partial scores are ever written.
+- **Restart:** rounds left in `Judging` are judged again; scores committed but
+  not yet published are published without judging again.
+
+### Scores
+
+All components are on a 0–10 scale, stored as integer hundredths.
+
+| Component | Source |
+| --- | --- |
+| `accuracy` | Judge, against the challenge's own rubric |
+| `simplicity` | Judge: how clear and economical the prompt is |
+| `creativity` | Judge |
+| `adherence` | Judge, against the challenge's constraints |
+| `efficiency` | Server: mean of a test score (10 for one test, −1 per extra test, min 0) and a length score (10 up to 100 code points, falling linearly to 0 at 2000) |
+| `total` | Weighted mean, weights from `SCORE_WEIGHTS` (equal by default) |
+
+Ranking: `total` desc, then higher `accuracy`, fewer tests, shorter prompt,
+earlier submission; exact ties share a rank (1, 1, 3); `no_submission` last.
+
+After the scores commit, the round moves to `Results` and the room receives
+`round_results` (ranked, with every prompt, output, score and rationale): the
+first moment opponents' work is shown. A reconnect during `Results` gets the
+same results in `game_state.round_results`. After `RESULTS_DURATION` the next
+round starts, or the game ends after the last.
+
 ## AI layer
 
 `internal/ai` is provider-agnostic: business logic uses its `AIClient`,
@@ -533,10 +612,9 @@ model, attempt, latency, tokens, cost, finish reason, error kind and
 
 **Judging.** When a round enters `Judging`, the engine hands it to
 `RoundJudge` on its own goroutine, outside the game's lock, so AI latency never
-delays a transition or the round timer. Rounds do not record their challenge
-yet, so judging currently logs `reason=rounds_have_no_challenge` and leaves
-the round in `Judging`; the full pipeline (execute, judge, complete) is tested
-with a fake challenge source. AI is off unless `AI_ENABLED=true`.
+delays a transition or the round timer; see
+[Submissions and scoring](#submissions-and-scoring). AI is off unless
+`AI_ENABLED=true`, in which case rounds wait in `Judging`.
 
 ## Redis (live game state)
 

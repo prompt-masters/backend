@@ -69,6 +69,8 @@ type GameProgress struct {
 	RoundID        uuid.UUID
 	RoundStartedAt time.Time
 	RoundDeadline  time.Time
+	// ChallengeID is the current (or last) round's challenge.
+	ChallengeID uuid.UUID
 }
 
 // AcceptsSubmissions reports whether a submission made at now belongs to the
@@ -77,10 +79,12 @@ func (p GameProgress) AcceptsSubmissions(now time.Time) bool {
 	return p.Phase == GamePhaseRoundActive && now.Before(p.RoundDeadline)
 }
 
-// RoundPlan is what entering a new round needs: its ID and its length.
+// RoundPlan is what entering a new round needs: its ID, its length and its
+// challenge.
 type RoundPlan struct {
-	ID     uuid.UUID
-	Length time.Duration
+	ID          uuid.UUID
+	Length      time.Duration
+	ChallengeID uuid.UUID
 }
 
 type transition struct {
@@ -146,6 +150,7 @@ func (p GameProgress) Next(event GameEvent, now time.Time, plan RoundPlan) (Game
 		next.RoundID = plan.ID
 		next.RoundStartedAt = started
 		next.RoundDeadline = started.Add(plan.Length)
+		next.ChallengeID = plan.ChallengeID
 	}
 	return next, nil
 }

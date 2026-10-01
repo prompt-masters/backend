@@ -32,6 +32,11 @@ const (
 	defaultActiveGameTTL     = 2 * time.Hour
 	defaultEndedGameTTL      = 15 * time.Minute
 
+	defaultJudgeMaxRuns    = 3
+	defaultJudgeRetryDelay = 5 * time.Second
+	defaultJudgeStaleAfter = 5 * time.Minute
+	defaultResultsDuration = 15 * time.Second
+
 	defaultPromptTestMaxBytes      = 8 << 10
 	defaultPromptTestMaxConcurrent = 1
 	defaultPromptTestStaleAfter    = 5 * time.Minute
@@ -67,6 +72,23 @@ type Config struct {
 	AIEnabled   bool
 	AI          ai.Config
 	PromptTests PromptTestConfig
+	Judging     JudgingConfig
+	// ResultsDuration is how long a round's results are shown before the
+	// game moves on by itself.
+	ResultsDuration time.Duration
+}
+
+// JudgingConfig controls how rounds are judged and scored.
+type JudgingConfig struct {
+	// MaxRuns is how many times a round's judging runs before giving up
+	// and waiting for the host to retry.
+	MaxRuns int
+	// RetryDelay is the wait before the second run; it doubles each run.
+	RetryDelay time.Duration
+	// StaleAfter is when a run still marked running is taken to have lost
+	// its worker and may be claimed again.
+	StaleAfter time.Duration
+	Weights    domain.ScoreWeights
 }
 
 // PromptTestConfig limits the prompt tests players run during a round.
@@ -184,6 +206,12 @@ func Load() (*Config, error) {
 	}
 	if err := cfg.PromptTests.Validate(); err != nil {
 		return nil, err
+	}
+	if cfg.Judging, err = loadJudging(); err != nil {
+		return nil, fmt.Errorf("invalid judging config: %w", err)
+	}
+	if cfg.ResultsDuration = envDuration("RESULTS_DURATION", defaultResultsDuration); cfg.ResultsDuration <= 0 {
+		return nil, errors.New("RESULTS_DURATION must be positive")
 	}
 	if cfg.AIEnabled = envBool("AI_ENABLED", false); cfg.AIEnabled {
 		if cfg.AI, err = loadAI(); err != nil {
@@ -366,4 +394,44 @@ func splitList(v string) []string {
 		}
 	}
 	return out
+}
+
+// loadJudging reads the judging settings. SCORE_WEIGHTS is
+// "accuracy=1,simplicity=1,creativity=1,adherence=1,efficiency=1"; omitted
+// components keep the default weight of 1.
+func loadJudging() (JudgingConfig, error) {
+	cfg := JudgingConfig{
+		MaxRuns:    envInt("JUDGE_MAX_RUNS", defaultJudgeMaxRuns),
+		RetryDelay: envDuration("JUDGE_RETRY_DELAY", defaultJudgeRetryDelay),
+		StaleAfter: envDuration("JUDGE_STALE_AFTER", defaultJudgeStaleAfter),
+		Weights:    domain.DefaultScoreWeights,
+	}
+	for _, entry := range splitList(os.Getenv("SCORE_WEIGHTS")) {
+		name, value, _ := strings.Cut(entry, "=")
+		w, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return cfg, fmt.Errorf("SCORE_WEIGHTS entry %q must be component=weight", entry)
+		}
+		switch strings.TrimSpace(name) {
+		case "accuracy":
+			cfg.Weights.Accuracy = w
+		case "simplicity":
+			cfg.Weights.Simplicity = w
+		case "creativity":
+			cfg.Weights.Creativity = w
+		case "adherence":
+			cfg.Weights.Adherence = w
+		case "efficiency":
+			cfg.Weights.Efficiency = w
+		default:
+			return cfg, fmt.Errorf("SCORE_WEIGHTS has an unknown component %q", name)
+		}
+	}
+	switch {
+	case !cfg.Weights.Valid():
+		return cfg, errors.New("SCORE_WEIGHTS must not be negative and must not all be zero")
+	case cfg.MaxRuns < 1 || cfg.RetryDelay <= 0 || cfg.StaleAfter <= 0:
+		return cfg, errors.New("JUDGE_MAX_RUNS, JUDGE_RETRY_DELAY and JUDGE_STALE_AFTER must be positive")
+	}
+	return cfg, nil
 }

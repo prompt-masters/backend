@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +23,9 @@ import (
 type fakeGameStore struct {
 	mu          sync.Mutex
 	games       map[uuid.UUID]*domain.Game
-	submissions map[uuid.UUID][]domain.Submission // by round ID
+	submissions map[uuid.UUID]*domain.Submission // by ID
+	judgingRuns map[uuid.UUID]*domain.JudgingRun // by round ID
+	scores      []domain.Score
 	rounds      map[uuid.UUID]domain.Round
 	promptTests map[uuid.UUID]*domain.PromptTest
 	challenges  *fakeChallengeRepository
@@ -37,7 +40,8 @@ type fakeGameStore struct {
 func newFakeGameStore() *fakeGameStore {
 	return &fakeGameStore{
 		games:       map[uuid.UUID]*domain.Game{},
-		submissions: map[uuid.UUID][]domain.Submission{},
+		submissions: map[uuid.UUID]*domain.Submission{},
+		judgingRuns: map[uuid.UUID]*domain.JudgingRun{},
 		rounds:      map[uuid.UUID]domain.Round{},
 		promptTests: map[uuid.UUID]*domain.PromptTest{},
 		usernames:   map[uuid.UUID]string{},
@@ -56,20 +60,28 @@ func (s *fakeGameStore) WithinTx(ctx context.Context, fn func(repository.TxRepos
 	for id, g := range s.games {
 		snapshot[id] = cloneGame(g)
 	}
-	submissions, rounds := maps.Clone(s.submissions), maps.Clone(s.rounds)
-	tests := make(map[uuid.UUID]*domain.PromptTest, len(s.promptTests))
-	for id, pt := range s.promptTests {
-		c := *pt
-		tests[id] = &c
-	}
+	rounds, scores := maps.Clone(s.rounds), slices.Clone(s.scores)
+	submissions, tests, runs := clonePtrs(s.submissions), clonePtrs(s.promptTests), clonePtrs(s.judgingRuns)
 	repos := repository.TxRepositories{
-		Games: fakeGameRepo{s}, Challenges: s.challenges, Submissions: fakeSubmissionRepo{s}, PromptTests: fakePromptTestRepo{s},
+		Games: fakeGameRepo{s}, Challenges: s.challenges, Submissions: fakeSubmissionRepo{s},
+		PromptTests: fakePromptTestRepo{s}, Judging: fakeJudgingRepo{s},
 	}
 	if err := fn(repos); err != nil {
 		s.games, s.submissions, s.rounds, s.promptTests = snapshot, submissions, rounds, tests
+		s.judgingRuns, s.scores = runs, scores
 		return err
 	}
 	return nil
+}
+
+// clonePtrs deep-copies a map of pointers, for rolling back a transaction.
+func clonePtrs[K comparable, V any](m map[K]*V) map[K]*V {
+	out := make(map[K]*V, len(m))
+	for k, v := range m {
+		c := *v
+		out[k] = &c
+	}
+	return out
 }
 
 // cloneGame copies g as the database would return it: the total number of
@@ -260,24 +272,139 @@ func (r fakeGameRepo) GetRound(_ context.Context, id uuid.UUID) (*domain.Round, 
 	return &round, nil
 }
 
-type fakeSubmissionRepo struct{ s *fakeGameStore }
-
-func (r fakeSubmissionRepo) Create(_ context.Context, sub domain.Submission) error {
-	subs := r.s.submissions[sub.RoundID]
-	if slices.ContainsFunc(subs, func(s domain.Submission) bool { return s.UserID == sub.UserID }) {
-		return domain.ErrAlreadySubmitted
+func (r fakeGameRepo) ListChallengeIDs(_ context.Context, gameID uuid.UUID) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	for _, round := range r.s.rounds {
+		if round.GameID == gameID && round.ChallengeID != uuid.Nil {
+			ids = append(ids, round.ChallengeID)
+		}
 	}
-	// Copy on write, so a rolled-back transaction's snapshot is untouched.
-	r.s.submissions[sub.RoundID] = append(slices.Clone(subs), sub)
-	return nil
+	return ids, nil
 }
 
-func (r fakeSubmissionRepo) CountByRound(_ context.Context, roundID uuid.UUID) (int, error) {
-	return len(r.s.submissions[roundID]), nil
+// fakeSubmissionRepo follows the PostgreSQL rules: one submission per player
+// and round, the first one staying, and no way to change one.
+type fakeSubmissionRepo struct{ s *fakeGameStore }
+
+func (r fakeSubmissionRepo) Create(_ context.Context, sub *domain.Submission) (bool, error) {
+	for _, other := range r.s.submissions {
+		if other.RoundID == sub.RoundID && other.PlayerID == sub.PlayerID {
+			return false, nil
+		}
+	}
+	sub.ID = uuid.New()
+	c := *sub
+	r.s.submissions[sub.ID] = &c
+	return true, nil
+}
+
+func (r fakeSubmissionRepo) Get(_ context.Context, id uuid.UUID) (*domain.Submission, error) {
+	sub, ok := r.s.submissions[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	c := *sub
+	return &c, nil
+}
+
+func (r fakeSubmissionRepo) GetForPlayer(_ context.Context, roundID, playerID uuid.UUID) (*domain.Submission, error) {
+	for _, sub := range r.s.submissions {
+		if sub.RoundID == roundID && sub.PlayerID == playerID {
+			c := *sub
+			return &c, nil
+		}
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (r fakeSubmissionRepo) Count(ctx context.Context, roundID uuid.UUID) (int, error) {
+	subs, _ := r.ListByRound(ctx, roundID)
+	return len(subs), nil
 }
 
 func (r fakeSubmissionRepo) ListByRound(_ context.Context, roundID uuid.UUID) ([]domain.Submission, error) {
-	return slices.Clone(r.s.submissions[roundID]), nil
+	out := []domain.Submission{}
+	for _, sub := range r.s.submissions {
+		if sub.RoundID == roundID {
+			out = append(out, *sub)
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.Submission) int {
+		if c := a.SubmittedAt.Compare(b.SubmittedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.PlayerID.String(), b.PlayerID.String())
+	})
+	return out, nil
+}
+
+// fakeJudgingRepo follows the PostgreSQL claim and uniqueness rules.
+type fakeJudgingRepo struct{ s *fakeGameStore }
+
+func (r fakeJudgingRepo) Claim(_ context.Context, roundID, gameID uuid.UUID, now, staleBefore time.Time) (int, bool, error) {
+	run, ok := r.s.judgingRuns[roundID]
+	switch {
+	case !ok:
+		r.s.judgingRuns[roundID] = &domain.JudgingRun{RoundID: roundID, GameID: gameID, Status: domain.JudgingRunning, Attempt: 1, StartedAt: now}
+		return 1, true, nil
+	case run.Status == domain.JudgingFailed || (run.Status == domain.JudgingRunning && run.StartedAt.Before(staleBefore)):
+		run.Status, run.Attempt, run.StartedAt, run.ErrorCode = domain.JudgingRunning, run.Attempt+1, now, ""
+		return run.Attempt, true, nil
+	}
+	return 0, false, nil
+}
+
+func (r fakeJudgingRepo) Get(_ context.Context, roundID uuid.UUID) (*domain.JudgingRun, error) {
+	run, ok := r.s.judgingRuns[roundID]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	c := *run
+	return &c, nil
+}
+
+func (r fakeJudgingRepo) Complete(_ context.Context, roundID uuid.UUID, attempt int, _ time.Time, _ domain.JudgeCall) error {
+	run, ok := r.s.judgingRuns[roundID]
+	if !ok || run.Status != domain.JudgingRunning || run.Attempt != attempt {
+		return domain.ErrStaleGameState
+	}
+	run.Status = domain.JudgingCompleted
+	return nil
+}
+
+func (r fakeJudgingRepo) Fail(_ context.Context, roundID uuid.UUID, attempt int, _ time.Time, code string) error {
+	run, ok := r.s.judgingRuns[roundID]
+	if !ok || run.Status != domain.JudgingRunning || run.Attempt != attempt {
+		return domain.ErrStaleGameState
+	}
+	run.Status, run.ErrorCode = domain.JudgingFailed, code
+	return nil
+}
+
+func (r fakeJudgingRepo) CreateScore(_ context.Context, sc domain.Score) error {
+	for _, other := range r.s.scores {
+		if other.RoundID == sc.RoundID && other.PlayerID == sc.PlayerID {
+			return errors.New("duplicate score")
+		}
+	}
+	r.s.scores = append(r.s.scores, sc)
+	return nil
+}
+
+func (r fakeJudgingRepo) ListScores(_ context.Context, roundID uuid.UUID) ([]domain.Score, error) {
+	out := []domain.Score{}
+	for _, sc := range r.s.scores {
+		if sc.RoundID == roundID {
+			out = append(out, sc)
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.Score) int {
+		if a.Rank != b.Rank {
+			return a.Rank - b.Rank
+		}
+		return strings.Compare(a.PlayerID.String(), b.PlayerID.String())
+	})
+	return out, nil
 }
 
 // sequenceRandom returns its values in order, then repeats the last one.
@@ -344,6 +471,10 @@ type publishedEvent struct {
 	playerCount int
 	progress    domain.GameProgress
 	reason      string
+	submitted   int
+	total       int
+	results     *domain.RoundResults
+	retryable   bool
 }
 
 func (r *recordingEvents) record(e publishedEvent) {
@@ -364,8 +495,16 @@ func (r *recordingEvents) GameUpdated(_ context.Context, game *domain.Game) {
 	r.record(publishedEvent{kind: "game_state", gameID: game.ID, status: game.Status, playerCount: game.PlayerCount, progress: game.Progress})
 }
 
-func (r *recordingEvents) PlayerSubmitted(_ context.Context, game *domain.Game, userID uuid.UUID, _ time.Time) {
-	r.record(publishedEvent{kind: "player_submitted", gameID: game.ID, userID: userID, status: game.Status, progress: game.Progress})
+func (r *recordingEvents) PlayerSubmitted(_ context.Context, game *domain.Game, userID uuid.UUID, submitted, total int) {
+	r.record(publishedEvent{kind: "player_submitted", gameID: game.ID, userID: userID, status: game.Status, progress: game.Progress, submitted: submitted, total: total})
+}
+
+func (r *recordingEvents) RoundResults(_ context.Context, gameID uuid.UUID, results domain.RoundResults) {
+	r.record(publishedEvent{kind: "round_results", gameID: gameID, results: &results})
+}
+
+func (r *recordingEvents) JudgingFailed(_ context.Context, gameID, _ uuid.UUID, retryable bool) {
+	r.record(publishedEvent{kind: "judging_failed", gameID: gameID, retryable: retryable})
 }
 
 func (r *recordingEvents) RoundEnded(_ context.Context, game *domain.Game, reason string) {
@@ -404,7 +543,7 @@ func newGameServiceFixture() *gameServiceFixture {
 		events: &recordingEvents{},
 		clock:  newFakeClock(time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)),
 	}
-	f.engine = NewGameEngine(f.store, f.clock, f.events, f.live, log.New(io.Discard, "", 0))
+	f.engine = NewGameEngine(f.store, f.clock, f.events, f.live, log.New(io.Discard, "", 0), EngineOptions{Random: f.random})
 	f.svc = NewGameService(f.store, f.random, f.live, f.events, f.engine)
 	return f
 }

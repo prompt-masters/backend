@@ -46,4 +46,6 @@ type GameRepository interface {
 	CreateRound(ctx context.Context, round domain.Round) error
 	// GetRound returns domain.ErrNotFound for an unknown round.
 	GetRound(ctx context.Context, id uuid.UUID) (*domain.Round, error)
+	// ListChallengeIDs returns the challenges the game's rounds were played on.
+	ListChallengeIDs(ctx context.Context, gameID uuid.UUID) ([]uuid.UUID, error)
 }

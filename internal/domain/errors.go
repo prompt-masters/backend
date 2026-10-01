@@ -30,4 +30,7 @@ var (
 	ErrAlreadySubmitted         = errors.New("already submitted this round")
 	ErrTestInProgress           = errors.New("a prompt test is already running")
 	ErrAIUnavailable            = errors.New("AI is not available")
+	ErrInvalidTest              = errors.New("not one of your completed tests in this round")
+	ErrResultsNotReady          = errors.New("round results are not published yet")
+	ErrJudgingNotFailed         = errors.New("round judging has not failed")
 )

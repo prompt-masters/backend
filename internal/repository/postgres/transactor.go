@@ -29,6 +29,7 @@ func (t *Transactor) WithinTx(ctx context.Context, fn func(repos repository.TxRe
 			Challenges:  NewChallengeRepository(queries),
 			Submissions: NewSubmissionRepository(queries),
 			PromptTests: NewPromptTestRepository(queries),
+			Judging:     NewJudgingRepository(queries),
 		})
 	})
 }

@@ -29,7 +29,7 @@ const CreateGame = `-- name: CreateGame :one
 INSERT INTO games (room_code, host_id)
 VALUES ($1, $2)
 ON CONFLICT (room_code) WHERE status IN ('waiting', 'in_progress') DO NOTHING
-RETURNING id, room_code, host_id, status, created_at, updated_at, started_at, phase, current_round, round_id, round_started_at_ms, round_deadline_ms
+RETURNING id, room_code, host_id, status, created_at, updated_at, started_at, phase, current_round, round_id, round_started_at_ms, round_deadline_ms, round_challenge_id
 `
 
 type CreateGameParams struct {
@@ -54,13 +54,14 @@ func (q *Queries) CreateGame(ctx context.Context, arg CreateGameParams) (*Game, 
 		&i.RoundID,
 		&i.RoundStartedAtMs,
 		&i.RoundDeadlineMs,
+		&i.RoundChallengeID,
 	)
 	return &i, err
 }
 
 const CreateGameRound = `-- name: CreateGameRound :exec
-INSERT INTO game_rounds (id, game_id, number, started_at_ms, deadline_ms)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO game_rounds (id, game_id, number, started_at_ms, deadline_ms, challenge_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type CreateGameRoundParams struct {
@@ -69,6 +70,7 @@ type CreateGameRoundParams struct {
 	Number      int16
 	StartedAtMs int64
 	DeadlineMs  int64
+	ChallengeID pgtype.UUID
 }
 
 func (q *Queries) CreateGameRound(ctx context.Context, arg CreateGameRoundParams) error {
@@ -78,6 +80,7 @@ func (q *Queries) CreateGameRound(ctx context.Context, arg CreateGameRoundParams
 		arg.Number,
 		arg.StartedAtMs,
 		arg.DeadlineMs,
+		arg.ChallengeID,
 	)
 	return err
 }
@@ -123,7 +126,7 @@ func (q *Queries) GetActiveGameIDByRoomCode(ctx context.Context, roomCode string
 }
 
 const GetGameByID = `-- name: GetGameByID :one
-SELECT g.id, g.room_code, g.host_id, g.status, g.created_at, g.updated_at, g.started_at, g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, s.game_id, s.rounds, s.time_per_round, s.difficulty, s.category, s.ai_model, s.max_players, s.updated_at,
+SELECT g.id, g.room_code, g.host_id, g.status, g.created_at, g.updated_at, g.started_at, g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, g.round_challenge_id, s.game_id, s.rounds, s.time_per_round, s.difficulty, s.category, s.ai_model, s.max_players, s.updated_at,
        (SELECT COUNT(*) FROM game_players p WHERE p.game_id = g.id)::int AS player_count
 FROM games g
 JOIN game_settings s ON s.game_id = g.id
@@ -152,6 +155,7 @@ func (q *Queries) GetGameByID(ctx context.Context, id pgtype.UUID) (*GetGameByID
 		&i.Game.RoundID,
 		&i.Game.RoundStartedAtMs,
 		&i.Game.RoundDeadlineMs,
+		&i.Game.RoundChallengeID,
 		&i.GameSetting.GameID,
 		&i.GameSetting.Rounds,
 		&i.GameSetting.TimePerRound,
@@ -166,7 +170,7 @@ func (q *Queries) GetGameByID(ctx context.Context, id pgtype.UUID) (*GetGameByID
 }
 
 const GetGameProgress = `-- name: GetGameProgress :one
-SELECT g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, s.rounds
+SELECT g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, g.round_challenge_id, s.rounds
 FROM games g
 JOIN game_settings s ON s.game_id = g.id
 WHERE g.id = $1
@@ -178,6 +182,7 @@ type GetGameProgressRow struct {
 	RoundID          pgtype.UUID
 	RoundStartedAtMs pgtype.Int8
 	RoundDeadlineMs  pgtype.Int8
+	RoundChallengeID pgtype.UUID
 	Rounds           int16
 }
 
@@ -190,13 +195,14 @@ func (q *Queries) GetGameProgress(ctx context.Context, id pgtype.UUID) (*GetGame
 		&i.RoundID,
 		&i.RoundStartedAtMs,
 		&i.RoundDeadlineMs,
+		&i.RoundChallengeID,
 		&i.Rounds,
 	)
 	return &i, err
 }
 
 const GetGameRound = `-- name: GetGameRound :one
-SELECT id, game_id, number, started_at_ms, deadline_ms FROM game_rounds WHERE id = $1
+SELECT id, game_id, number, started_at_ms, deadline_ms, challenge_id FROM game_rounds WHERE id = $1
 `
 
 func (q *Queries) GetGameRound(ctx context.Context, id pgtype.UUID) (*GameRound, error) {
@@ -208,8 +214,36 @@ func (q *Queries) GetGameRound(ctx context.Context, id pgtype.UUID) (*GameRound,
 		&i.Number,
 		&i.StartedAtMs,
 		&i.DeadlineMs,
+		&i.ChallengeID,
 	)
 	return &i, err
+}
+
+const ListGameChallengeIDs = `-- name: ListGameChallengeIDs :many
+SELECT challenge_id::uuid FROM game_rounds
+WHERE game_id = $1 AND challenge_id IS NOT NULL
+ORDER BY number
+`
+
+// The challenges already played in a game, so a new round avoids them.
+func (q *Queries) ListGameChallengeIDs(ctx context.Context, gameID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, ListGameChallengeIDs, gameID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var challenge_id pgtype.UUID
+		if err := rows.Scan(&challenge_id); err != nil {
+			return nil, err
+		}
+		items = append(items, challenge_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const ListGamePlayers = `-- name: ListGamePlayers :many
@@ -247,7 +281,7 @@ func (q *Queries) ListGamePlayers(ctx context.Context, gameID pgtype.UUID) ([]*L
 }
 
 const ListGamesByPhase = `-- name: ListGamesByPhase :many
-SELECT g.id, g.room_code, g.host_id, g.status, g.created_at, g.updated_at, g.started_at, g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, s.game_id, s.rounds, s.time_per_round, s.difficulty, s.category, s.ai_model, s.max_players, s.updated_at
+SELECT g.id, g.room_code, g.host_id, g.status, g.created_at, g.updated_at, g.started_at, g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, g.round_challenge_id, s.game_id, s.rounds, s.time_per_round, s.difficulty, s.category, s.ai_model, s.max_players, s.updated_at
 FROM games g
 JOIN game_settings s ON s.game_id = g.id
 WHERE g.phase = $1
@@ -281,6 +315,7 @@ func (q *Queries) ListGamesByPhase(ctx context.Context, phase string) ([]*ListGa
 			&i.Game.RoundID,
 			&i.Game.RoundStartedAtMs,
 			&i.Game.RoundDeadlineMs,
+			&i.Game.RoundChallengeID,
 			&i.GameSetting.GameID,
 			&i.GameSetting.Rounds,
 			&i.GameSetting.TimePerRound,
@@ -301,7 +336,7 @@ func (q *Queries) ListGamesByPhase(ctx context.Context, phase string) ([]*ListGa
 }
 
 const ListGamesByStatus = `-- name: ListGamesByStatus :many
-SELECT g.id, g.room_code, g.host_id, g.status, g.created_at, g.updated_at, g.started_at, g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, s.game_id, s.rounds, s.time_per_round, s.difficulty, s.category, s.ai_model, s.max_players, s.updated_at,
+SELECT g.id, g.room_code, g.host_id, g.status, g.created_at, g.updated_at, g.started_at, g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, g.round_challenge_id, s.game_id, s.rounds, s.time_per_round, s.difficulty, s.category, s.ai_model, s.max_players, s.updated_at,
        (SELECT COUNT(*) FROM game_players p WHERE p.game_id = g.id)::int AS player_count
 FROM games g
 JOIN game_settings s ON s.game_id = g.id
@@ -343,6 +378,7 @@ func (q *Queries) ListGamesByStatus(ctx context.Context, arg ListGamesByStatusPa
 			&i.Game.RoundID,
 			&i.Game.RoundStartedAtMs,
 			&i.Game.RoundDeadlineMs,
+			&i.Game.RoundChallengeID,
 			&i.GameSetting.GameID,
 			&i.GameSetting.Rounds,
 			&i.GameSetting.TimePerRound,
@@ -417,13 +453,14 @@ SET phase               = $1::varchar,
     round_id            = $4::uuid,
     round_started_at_ms = $5::bigint,
     round_deadline_ms   = $6::bigint,
+    round_challenge_id  = $7::uuid,
     started_at          = CASE WHEN $2::varchar = 'in_progress'
                                THEN COALESCE(started_at, NOW()) ELSE started_at END,
     updated_at          = NOW()
-WHERE id = $7
-  AND phase = $8::varchar
-  AND status = $9::varchar
-  AND round_id IS NOT DISTINCT FROM $10::uuid
+WHERE id = $8
+  AND phase = $9::varchar
+  AND status = $10::varchar
+  AND round_id IS NOT DISTINCT FROM $11::uuid
 `
 
 type UpdateGameProgressParams struct {
@@ -433,6 +470,7 @@ type UpdateGameProgressParams struct {
 	RoundID          pgtype.UUID
 	RoundStartedAtMs pgtype.Int8
 	RoundDeadlineMs  pgtype.Int8
+	RoundChallengeID pgtype.UUID
 	ID               pgtype.UUID
 	FromPhase        string
 	FromStatus       string
@@ -450,6 +488,7 @@ func (q *Queries) UpdateGameProgress(ctx context.Context, arg UpdateGameProgress
 		arg.RoundID,
 		arg.RoundStartedAtMs,
 		arg.RoundDeadlineMs,
+		arg.RoundChallengeID,
 		arg.ID,
 		arg.FromPhase,
 		arg.FromStatus,

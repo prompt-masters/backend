@@ -8,6 +8,7 @@ type TxRepositories struct {
 	Challenges  ChallengeRepository
 	Submissions SubmissionRepository
 	PromptTests PromptTestRepository
+	Judging     JudgingRepository
 }
 
 // Transactor runs fn in a single database transaction, handing it repositories

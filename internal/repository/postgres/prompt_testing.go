@@ -94,6 +94,29 @@ func (r *PromptTestRepository) FailStale(ctx context.Context, before, now time.T
 	return r.queries.FailStalePromptTests(ctx, db.FailStalePromptTestsParams{BeforeMs: before.UnixMilli(), NowMs: pgtype.Int8{Int64: now.UnixMilli(), Valid: true}})
 }
 
+func (r *PromptTestRepository) Get(ctx context.Context, id uuid.UUID) (*domain.PromptTest, error) {
+	row, err := r.queries.GetPromptTest(ctx, pgUUID(id))
+	if err != nil {
+		return nil, translateGetError(err)
+	}
+	t := toDomainPromptTest(row)
+	return &t, nil
+}
+
+func (r *PromptTestRepository) Count(ctx context.Context, roundID, playerID uuid.UUID) (int, error) {
+	n, err := r.queries.CountPromptTests(ctx, db.CountPromptTestsParams{RoundID: pgUUID(roundID), PlayerID: pgUUID(playerID)})
+	return int(n), err
+}
+
+func (r *PromptTestRepository) LastCompleted(ctx context.Context, roundID, playerID uuid.UUID) (*domain.PromptTest, error) {
+	row, err := r.queries.LastCompletedPromptTest(ctx, db.LastCompletedPromptTestParams{RoundID: pgUUID(roundID), PlayerID: pgUUID(playerID)})
+	if err != nil {
+		return nil, translateGetError(err)
+	}
+	t := toDomainPromptTest(row)
+	return &t, nil
+}
+
 func toDomainPromptTest(row *db.PromptTest) domain.PromptTest {
 	t := domain.PromptTest{
 		ID:           uuidFromPg(row.ID),

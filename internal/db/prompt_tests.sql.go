@@ -11,6 +11,23 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const CountPromptTests = `-- name: CountPromptTests :one
+SELECT COUNT(*)::int FROM prompt_tests WHERE round_id = $1 AND player_id = $2
+`
+
+type CountPromptTestsParams struct {
+	RoundID  pgtype.UUID
+	PlayerID pgtype.UUID
+}
+
+// Every attempt counts, whatever its status.
+func (q *Queries) CountPromptTests(ctx context.Context, arg CountPromptTestsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, CountPromptTests, arg.RoundID, arg.PlayerID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const CountUnfinishedPromptTests = `-- name: CountUnfinishedPromptTests :one
 SELECT COUNT(*)::int
 FROM prompt_tests
@@ -128,6 +145,74 @@ func (q *Queries) FinishPromptTest(ctx context.Context, arg FinishPromptTestPara
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const GetPromptTest = `-- name: GetPromptTest :one
+SELECT id, game_id, round_id, player_id, test_number, prompt, output, status, error_code, provider, model, input_tokens, output_tokens, cost_usd, latency_ms, created_at_ms, started_at_ms, completed_at_ms FROM prompt_tests WHERE id = $1
+`
+
+func (q *Queries) GetPromptTest(ctx context.Context, id pgtype.UUID) (*PromptTest, error) {
+	row := q.db.QueryRow(ctx, GetPromptTest, id)
+	var i PromptTest
+	err := row.Scan(
+		&i.ID,
+		&i.GameID,
+		&i.RoundID,
+		&i.PlayerID,
+		&i.TestNumber,
+		&i.Prompt,
+		&i.Output,
+		&i.Status,
+		&i.ErrorCode,
+		&i.Provider,
+		&i.Model,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CostUsd,
+		&i.LatencyMs,
+		&i.CreatedAtMs,
+		&i.StartedAtMs,
+		&i.CompletedAtMs,
+	)
+	return &i, err
+}
+
+const LastCompletedPromptTest = `-- name: LastCompletedPromptTest :one
+SELECT id, game_id, round_id, player_id, test_number, prompt, output, status, error_code, provider, model, input_tokens, output_tokens, cost_usd, latency_ms, created_at_ms, started_at_ms, completed_at_ms FROM prompt_tests
+WHERE round_id = $1 AND player_id = $2 AND status = 'completed'
+ORDER BY test_number DESC
+LIMIT 1
+`
+
+type LastCompletedPromptTestParams struct {
+	RoundID  pgtype.UUID
+	PlayerID pgtype.UUID
+}
+
+func (q *Queries) LastCompletedPromptTest(ctx context.Context, arg LastCompletedPromptTestParams) (*PromptTest, error) {
+	row := q.db.QueryRow(ctx, LastCompletedPromptTest, arg.RoundID, arg.PlayerID)
+	var i PromptTest
+	err := row.Scan(
+		&i.ID,
+		&i.GameID,
+		&i.RoundID,
+		&i.PlayerID,
+		&i.TestNumber,
+		&i.Prompt,
+		&i.Output,
+		&i.Status,
+		&i.ErrorCode,
+		&i.Provider,
+		&i.Model,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CostUsd,
+		&i.LatencyMs,
+		&i.CreatedAtMs,
+		&i.StartedAtMs,
+		&i.CompletedAtMs,
+	)
+	return &i, err
 }
 
 const ListPromptTests = `-- name: ListPromptTests :many

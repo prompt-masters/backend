@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"errors"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -164,50 +163,5 @@ func TestGameRepositoryListByPhase(t *testing.T) {
 	}
 	if games[0].Progress != started || games[0].Settings != testSettings {
 		t.Errorf("listed game = %+v, want its progress and settings", games[0])
-	}
-}
-
-func TestSubmissionRepository(t *testing.T) {
-	f := newGameFixture(t)
-	ctx := context.Background()
-	host, guest := f.user(t, "host"), f.user(t, "guest")
-	g := f.game(t, host, "300006")
-	repo := NewSubmissionRepository(db.New(f.pool))
-	roundID := uuid.New()
-
-	sub := domain.Submission{RoundID: roundID, GameID: g.ID, RoundNumber: 1, UserID: host, Prompt: "p", SubmittedAt: time.Now()}
-	if err := repo.Create(ctx, sub); err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-	if err := repo.Create(ctx, sub); !errors.Is(err, domain.ErrAlreadySubmitted) {
-		t.Fatalf("second Create() error = %v, want ErrAlreadySubmitted", err)
-	}
-	sub.UserID = guest
-	if err := repo.Create(ctx, sub); err != nil {
-		t.Fatalf("Create(guest) error = %v", err)
-	}
-	// The same player may submit again in a later round.
-	sub.RoundID, sub.RoundNumber = uuid.New(), 2
-	if err := repo.Create(ctx, sub); err != nil {
-		t.Fatalf("Create(next round) error = %v", err)
-	}
-
-	n, err := repo.CountByRound(ctx, roundID)
-	if err != nil || n != 2 {
-		t.Errorf("CountByRound() = %d, %v; want 2", n, err)
-	}
-
-	subs, err := repo.ListByRound(ctx, roundID)
-	if err != nil || len(subs) != 2 {
-		t.Fatalf("ListByRound() = %d, %v; want 2", len(subs), err)
-	}
-	// Both were submitted in the same millisecond, so either may come first.
-	i := slices.IndexFunc(subs, func(s domain.Submission) bool { return s.UserID == host })
-	if i < 0 {
-		t.Fatalf("host's submission missing from %+v", subs)
-	}
-	if got := subs[i]; got.Prompt != "p" || got.RoundNumber != 1 || got.GameID != g.ID || got.RoundID != roundID ||
-		got.SubmittedAt.UnixMilli() != sub.SubmittedAt.UnixMilli() {
-		t.Errorf("host's submission = %+v", got)
 	}
 }

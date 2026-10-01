@@ -81,6 +81,9 @@ func (s *LiveStateService) GetLiveState(ctx context.Context, userID uuid.UUID, r
 	}
 	live.Progress = *progress
 	live.ServerTime = s.now()
+	if live.Results, err = s.publishedResults(ctx, gameID, *progress); err != nil {
+		return nil, err
+	}
 	if live.Round != nil {
 		live.RoundRemaining = live.Round.Remaining(live.ServerTime)
 	}
@@ -285,7 +288,12 @@ func (s *LiveStateService) rebuild(ctx context.Context, gameID, userID uuid.UUID
 	if game.Status.Active() {
 		s.SyncGame(ctx, game)
 	}
+	results, err := s.publishedResults(ctx, gameID, game.Progress)
+	if err != nil {
+		return nil, err
+	}
 	return &domain.LiveGameState{
+		Results:    results,
 		Lobby:      lobbyFromGame(game, s.now()),
 		Players:    livePlayersFromGame(game),
 		Ready:      []uuid.UUID{},
@@ -294,6 +302,29 @@ func (s *LiveStateService) rebuild(ctx context.Context, gameID, userID uuid.UUID
 		Progress:   game.Progress,
 		ServerTime: s.now(),
 	}, nil
+}
+
+// publishedResults returns the last round's results while the game shows
+// them or is over, so a reconnecting player sees what the room saw. Earlier,
+// there is nothing to show.
+func (s *LiveStateService) publishedResults(ctx context.Context, gameID uuid.UUID, p domain.GameProgress) (*domain.RoundResults, error) {
+	if (p.Phase != domain.GamePhaseResults && p.Phase != domain.GamePhaseGameOver) || p.RoundID == uuid.Nil {
+		return nil, nil
+	}
+	var results *domain.RoundResults
+	err := s.tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
+		game, err := repos.Games.GetByID(ctx, gameID)
+		if err != nil {
+			return err
+		}
+		if ok, err := resultsPublished(ctx, repos, game, p.RoundID); err != nil || !ok {
+			return err
+		}
+		r, err := loadRoundResults(ctx, repos, gameID, p.RoundID)
+		results = &r
+		return err
+	})
+	return results, err
 }
 
 // progress reads the game engine's state, which PostgreSQL owns.

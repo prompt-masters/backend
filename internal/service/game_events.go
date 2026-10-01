@@ -48,12 +48,21 @@ func (e *GameEvents) GameUpdated(_ context.Context, game *domain.Game) {
 	e.publish(game.ID, ws.GameStateFromGame(game, e.now()))
 }
 
-func (e *GameEvents) PlayerSubmitted(_ context.Context, game *domain.Game, userID uuid.UUID, submittedAt time.Time) {
+func (e *GameEvents) PlayerSubmitted(_ context.Context, game *domain.Game, userID uuid.UUID, submitted, total int) {
 	e.publish(game.ID, ws.PlayerSubmittedPayload{
-		UserID:      userID.String(),
-		RoundNumber: game.Progress.CurrentRound,
-		SubmittedAt: submittedAt.UTC(),
+		PlayerID:       userID.String(),
+		RoundID:        game.Progress.RoundID.String(),
+		SubmittedCount: submitted,
+		TotalPlayers:   total,
 	})
+}
+
+func (e *GameEvents) RoundResults(_ context.Context, gameID uuid.UUID, results domain.RoundResults) {
+	e.publish(gameID, ws.RoundResultsFrom(results))
+}
+
+func (e *GameEvents) JudgingFailed(_ context.Context, gameID, roundID uuid.UUID, retryable bool) {
+	e.publish(gameID, ws.JudgingFailedPayload{RoundID: roundID.String(), Retryable: retryable})
 }
 
 func (e *GameEvents) RoundEnded(_ context.Context, game *domain.Game, reason string) {

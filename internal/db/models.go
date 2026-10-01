@@ -34,6 +34,7 @@ type Game struct {
 	RoundID          pgtype.UUID
 	RoundStartedAtMs pgtype.Int8
 	RoundDeadlineMs  pgtype.Int8
+	RoundChallengeID pgtype.UUID
 }
 
 type GamePlayer struct {
@@ -48,6 +49,7 @@ type GameRound struct {
 	Number      int16
 	StartedAtMs int64
 	DeadlineMs  int64
+	ChallengeID pgtype.UUID
 }
 
 type GameSetting struct {
@@ -59,6 +61,21 @@ type GameSetting struct {
 	AiModel      string
 	MaxPlayers   int16
 	UpdatedAt    pgtype.Timestamptz
+}
+
+type JudgingRun struct {
+	RoundID      pgtype.UUID
+	GameID       pgtype.UUID
+	Status       string
+	Attempt      int32
+	StartedAtMs  int64
+	FinishedAtMs pgtype.Int8
+	ErrorCode    pgtype.Text
+	Provider     pgtype.Text
+	Model        pgtype.Text
+	InputTokens  pgtype.Int4
+	OutputTokens pgtype.Int4
+	CostUsd      pgtype.Float8
 }
 
 type PromptTest struct {
@@ -90,13 +107,40 @@ type RefreshToken struct {
 	CreatedAt pgtype.Timestamptz
 }
 
-type RoundSubmission struct {
-	RoundID       pgtype.UUID
+type Score struct {
+	ID           pgtype.UUID
+	GameID       pgtype.UUID
+	RoundID      pgtype.UUID
+	PlayerID     pgtype.UUID
+	SubmissionID pgtype.UUID
+	NoSubmission bool
+	Label        pgtype.Text
+	Accuracy     int32
+	Simplicity   int32
+	Creativity   int32
+	Adherence    int32
+	Efficiency   int32
+	Total        int32
+	Rank         int32
+	Rationale    pgtype.Text
+	Provider     pgtype.Text
+	Model        pgtype.Text
+	CreatedAtMs  int64
+}
+
+type Submission struct {
+	ID            pgtype.UUID
 	GameID        pgtype.UUID
-	RoundNumber   int16
-	UserID        pgtype.UUID
+	RoundID       pgtype.UUID
+	PlayerID      pgtype.UUID
+	TestID        pgtype.UUID
 	Prompt        string
+	Output        string
+	PromptLength  int32
+	TestCount     int32
+	Source        string
 	SubmittedAtMs int64
+	LockedAtMs    int64
 }
 
 type User struct {

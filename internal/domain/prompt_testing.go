@@ -8,11 +8,14 @@ import (
 
 // Round is one played round of a game, kept after the game moves on.
 type Round struct {
-	ID        uuid.UUID
-	GameID    uuid.UUID
-	Number    int
-	StartedAt time.Time
-	Deadline  time.Time
+	ID     uuid.UUID
+	GameID uuid.UUID
+	Number int
+	// ChallengeID is the challenge the round is played on; uuid.Nil only for
+	// rounds started before rounds had challenges.
+	ChallengeID uuid.UUID
+	StartedAt   time.Time
+	Deadline    time.Time
 }
 
 // PromptTestStatus is where a prompt test stands: pending, then streaming,

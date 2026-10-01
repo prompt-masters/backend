@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/prompt-masters/backend/internal/domain"
@@ -27,11 +26,15 @@ type GameEventPublisher interface {
 	PlayerJoined(ctx context.Context, game *domain.Game, userID uuid.UUID)
 	PlayerLeft(ctx context.Context, game *domain.Game, userID uuid.UUID, username string, hostChanged bool)
 	GameUpdated(ctx context.Context, game *domain.Game)
-	// PlayerSubmitted announces a submission without its prompt.
-	PlayerSubmitted(ctx context.Context, game *domain.Game, userID uuid.UUID, submittedAt time.Time)
+	// PlayerSubmitted announces a submission by count, never its content.
+	PlayerSubmitted(ctx context.Context, game *domain.Game, userID uuid.UUID, submitted, total int)
 	// RoundEnded announces that the round in game.Progress stopped taking
 	// submissions; reason is RoundEndAllSubmitted or RoundEndTimeExpired.
 	RoundEnded(ctx context.Context, game *domain.Game, reason string)
+	// RoundResults publishes a round's results to the whole room.
+	RoundResults(ctx context.Context, gameID uuid.UUID, results domain.RoundResults)
+	// JudgingFailed reports that judging roundID failed.
+	JudgingFailed(ctx context.Context, gameID, roundID uuid.UUID, retryable bool)
 }
 
 type GameSettingsInput struct {

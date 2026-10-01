@@ -16,6 +16,7 @@ type Server struct {
 	health     *handler.HealthHandler
 	liveState  *handler.LiveStateHandler
 	tests      *handler.PromptTestHandler
+	rounds     *handler.RoundHandler
 	websocket  *handler.WebSocketHandler
 	logger     *log.Logger
 	jwtSecret  string
@@ -27,6 +28,7 @@ func NewServer(
 	gameService *service.GameService,
 	liveStateService *service.LiveStateService,
 	promptTestService *service.PromptTestService,
+	roundService *service.RoundService,
 	websocketHandler *handler.WebSocketHandler,
 	healthChecks []handler.HealthCheck,
 	logger *log.Logger,
@@ -39,6 +41,7 @@ func NewServer(
 		health:     handler.NewHealthHandler(healthChecks, logger),
 		liveState:  handler.NewLiveStateHandler(liveStateService, logger),
 		tests:      handler.NewPromptTestHandler(promptTestService, logger),
+		rounds:     handler.NewRoundHandler(roundService, logger),
 		websocket:  websocketHandler,
 		logger:     logger,
 		jwtSecret:  jwtSecret,
@@ -84,6 +87,10 @@ func (s *Server) Routes() http.Handler {
 	protected("PUT", "/api/v1/games/{id}/draft", s.liveState.SaveDraft)
 	protected("POST", "/api/v1/rounds/{id}/test", s.tests.Start)
 	protected("GET", "/api/v1/rounds/{id}/tests", s.tests.List)
+	protected("POST", "/api/v1/rounds/{id}/submit", s.rounds.Submit)
+	protected("POST", "/api/v1/rounds/{id}/judge/retry", s.rounds.RetryJudging)
+	protected("GET", "/api/v1/submissions/{id}", s.rounds.GetSubmission)
+	protected("GET", "/api/v1/submissions/{id}/score", s.rounds.GetScore)
 
 	return mux
 }

@@ -97,6 +97,39 @@ func (r fakePromptTestRepo) FailStale(_ context.Context, before, now time.Time) 
 	return n, nil
 }
 
+func (r fakePromptTestRepo) Get(_ context.Context, id uuid.UUID) (*domain.PromptTest, error) {
+	t, ok := r.s.promptTests[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	c := *t
+	return &c, nil
+}
+
+func (r fakePromptTestRepo) Count(_ context.Context, roundID, playerID uuid.UUID) (int, error) {
+	n := 0
+	for _, t := range r.s.promptTests {
+		if t.RoundID == roundID && t.PlayerID == playerID {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (r fakePromptTestRepo) LastCompleted(_ context.Context, roundID, playerID uuid.UUID) (*domain.PromptTest, error) {
+	var last *domain.PromptTest
+	for _, t := range r.s.promptTests {
+		if t.RoundID == roundID && t.PlayerID == playerID && t.Status == domain.PromptTestCompleted && (last == nil || t.TestNumber > last.TestNumber) {
+			last = t
+		}
+	}
+	if last == nil {
+		return nil, domain.ErrNotFound
+	}
+	c := *last
+	return &c, nil
+}
+
 func (s *fakeGameStore) promptTest(id uuid.UUID) domain.PromptTest {
 	s.mu.Lock()
 	defer s.mu.Unlock()

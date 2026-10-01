@@ -308,8 +308,17 @@ func TestWebSocketRoundLifecycle(t *testing.T) {
 		t.Errorf("GET /live = %+v, want the stored round", live)
 	}
 
-	hostConn.send(t, `{"type":"submit_prompt","payload":{"prompt":"host prompt","round_id":"`+round.RoundID+`"}}`)
-	guestConn.send(t, `{"type":"submit_prompt","payload":{"prompt":"guest prompt"}}`)
+	// Each player tests a prompt, then submits that test.
+	for _, p := range []struct {
+		user testUser
+		conn *wsClient
+	}{{host, hostConn}, {guest, guestConn}} {
+		test := decode[struct {
+			TestID string `json:"test_id"`
+		}](t, a.expect(http.StatusAccepted, "POST", "/api/v1/rounds/"+round.RoundID+"/test", &p.user, map[string]any{"prompt": "a prompt"}))
+		p.conn.nextOfType(t, ws.TypeOutputComplete, 3*time.Second)
+		p.conn.send(t, `{"type":"submit_prompt","payload":{"round_id":"`+round.RoundID+`","test_id":"`+test.TestID+`"}}`)
+	}
 	for _, c := range []*wsClient{hostConn, guestConn} {
 		end := decodePayload[ws.RoundEndPayload](t, c.nextOfType(t, ws.TypeRoundEnd, 3*time.Second))
 		if end.RoundID != round.RoundID || end.Reason != "all_submitted" {
@@ -322,7 +331,7 @@ func TestWebSocketRoundLifecycle(t *testing.T) {
 	}
 
 	// The round is over: a late submission is refused.
-	guestConn.send(t, `{"type":"submit_prompt","payload":{"prompt":"too late"}}`)
+	guestConn.send(t, `{"type":"submit_prompt","payload":{"round_id":"`+round.RoundID+`","test_id":"`+uuid.NewString()+`"}}`)
 	refused := decodePayload[ws.ErrorPayload](t, guestConn.nextOfType(t, ws.TypeError, 3*time.Second))
 	if refused.Code != ws.CodeNotAllowed {
 		t.Errorf("late submission error = %+v, want not_allowed", refused)
@@ -411,7 +420,7 @@ func TestWebSocketClientMessages(t *testing.T) {
 		for raw, wantCode := range map[string]string{
 			`{"type":"prompt_test","payload":{"prompt":"hi"}}`: ws.CodeUnsupportedEvent,
 			// No round is in play before the game starts.
-			`{"type":"submit_prompt","payload":{"prompt":"hi"}}`: ws.CodeNotAllowed,
+			`{"type":"submit_prompt","payload":{"prompt":"hi"}}`: ws.CodeInvalidPayload,
 			`{"type":"nonsense","payload":{}}`:                   ws.CodeUnknownEvent,
 			`not json at all`:                                    ws.CodeMalformedMessage,
 		} {

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -133,8 +134,43 @@ func (f *engineFixture) start(t *testing.T) domain.GameProgress {
 	return f.progress()
 }
 
+// submit runs a completed test for userID in the current round and submits it.
 func (f *engineFixture) submit(userID uuid.UUID) error {
-	return f.engine.Submit(context.Background(), f.game.ID, userID, uuid.Nil, "my prompt")
+	test := f.addTest(userID, domain.PromptTestCompleted, "my prompt", "my output")
+	_, _, err := f.engine.Submit(context.Background(), f.game.ID, userID, f.progress().RoundID, test.ID)
+	return err
+}
+
+// addTest stores a prompt test for userID in the current round, numbered
+// after their earlier ones, as the prompt test service would.
+func (f *engineFixture) addTest(userID uuid.UUID, status domain.PromptTestStatus, prompt, output string) *domain.PromptTest {
+	round := f.progress().RoundID
+	test := &domain.PromptTest{
+		ID: uuid.New(), GameID: f.game.ID, RoundID: round, PlayerID: userID,
+		Prompt: prompt, Status: status, CreatedAt: f.clock.Now(),
+	}
+	if status == domain.PromptTestCompleted || output != "" {
+		test.Output = &output
+	}
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	for _, other := range f.store.promptTests {
+		if other.RoundID == round && other.PlayerID == userID {
+			test.TestNumber = max(test.TestNumber, other.TestNumber)
+		}
+	}
+	test.TestNumber++
+	c := *test
+	f.store.promptTests[test.ID] = &c
+	return test
+}
+
+// submissions returns the round's stored submissions.
+func (f *engineFixture) submissions(roundID uuid.UUID) []domain.Submission {
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	subs, _ := fakeSubmissionRepo{f.store}.ListByRound(context.Background(), roundID)
+	return subs
 }
 
 func (f *engineFixture) clearEvents() {
@@ -322,8 +358,17 @@ func TestGameEngineAllSubmittedEndsTheRoundEarly(t *testing.T) {
 	if reasons := f.roundEnds(); !slices.Equal(reasons, []string{RoundEndAllSubmitted}) {
 		t.Errorf("round_end reasons = %v, want one all_submitted", reasons)
 	}
-	if subs := f.store.submissions[round.RoundID]; len(subs) != 2 || subs[0].RoundNumber != 1 || subs[0].Prompt != "my prompt" {
+	if subs := f.submissions(round.RoundID); len(subs) != 2 || subs[0].Prompt != "my prompt" || subs[0].Output != "my output" || subs[0].Source != domain.SubmissionManual {
 		t.Errorf("stored submissions = %+v", subs)
+	}
+	var counts []string
+	for _, e := range f.events.events() {
+		if e.kind == "player_submitted" {
+			counts = append(counts, fmt.Sprintf("%d/%d", e.submitted, e.total))
+		}
+	}
+	if !slices.Equal(counts, []string{"1/2", "2/2"}) {
+		t.Errorf("player_submitted counts = %v, want 1/2 then 2/2", counts)
 	}
 }
 
@@ -383,24 +428,55 @@ func TestGameEngineRejectsSubmissions(t *testing.T) {
 	t.Run("invalid submissions", func(t *testing.T) {
 		f := newEngineFixture(t, 3)
 		round := f.start(t)
+		submit := func(user, roundID, testID uuid.UUID) (*domain.Submission, bool, error) {
+			return f.engine.Submit(ctx, f.game.ID, user, roundID, testID)
+		}
 
-		if err := f.engine.Submit(ctx, f.game.ID, uuid.New(), uuid.Nil, "p"); !errors.Is(err, domain.ErrNotGamePlayer) {
-			t.Errorf("Submit() by a stranger error = %v, want ErrNotGamePlayer", err)
+		failed := f.addTest(f.host, domain.PromptTestFailed, "p", "partial")
+		guests := f.addTest(f.guest, domain.PromptTestCompleted, "guest's", "out")
+		elsewhere := f.addTest(f.host, domain.PromptTestCompleted, "p", "out")
+		f.store.mu.Lock()
+		f.store.promptTests[elsewhere.ID].RoundID = uuid.New() // a test from another round
+		f.store.mu.Unlock()
+		valid := f.addTest(f.host, domain.PromptTestCompleted, "  héllo wörld  ", "the output")
+
+		for name, tc := range map[string]struct {
+			user, round, test uuid.UUID
+			want              error
+		}{
+			"stranger":              {uuid.New(), round.RoundID, valid.ID, domain.ErrNotGamePlayer},
+			"another round":         {f.host, uuid.New(), valid.ID, domain.ErrRoundNotActive},
+			"failed test":           {f.host, round.RoundID, failed.ID, domain.ErrInvalidTest},
+			"another player's test": {f.host, round.RoundID, guests.ID, domain.ErrInvalidTest},
+			"test from elsewhere":   {f.host, round.RoundID, elsewhere.ID, domain.ErrInvalidTest},
+			"unknown test":          {f.host, round.RoundID, uuid.New(), domain.ErrInvalidTest},
+		} {
+			if _, _, err := submit(tc.user, tc.round, tc.test); !errors.Is(err, tc.want) {
+				t.Errorf("%s: Submit() error = %v, want %v", name, err, tc.want)
+			}
 		}
-		if err := f.engine.Submit(ctx, f.game.ID, f.host, uuid.New(), "p"); !errors.Is(err, domain.ErrRoundNotActive) {
-			t.Errorf("Submit() for another round error = %v, want ErrRoundNotActive", err)
+
+		sub, created, err := submit(f.host, round.RoundID, valid.ID)
+		if err != nil || !created {
+			t.Fatalf("Submit() = %v, %v; want a new submission", created, err)
 		}
-		var vErr *ValidationError
-		if err := f.engine.Submit(ctx, f.game.ID, f.host, uuid.Nil, "  "); !errors.As(err, &vErr) || vErr.Fields["prompt"] == "" {
-			t.Errorf("Submit() of a blank prompt error = %v, want a prompt validation error", err)
+		// A snapshot of the test, with the counts scoring needs: the failed
+		// test counts as an attempt, the other round's does not (2 in all),
+		// and the length is code points of the trimmed prompt.
+		if sub.Prompt != "  héllo wörld  " || sub.Output != "the output" || sub.PromptLength != 11 || sub.TestCount != 2 ||
+			sub.TestID != valid.ID || sub.Source != domain.SubmissionManual || !sub.LockedAt.Equal(f.clock.Now()) || !sub.SubmittedAt.Equal(sub.LockedAt) {
+			t.Errorf("submission = %+v", sub)
 		}
-		if err := f.engine.Submit(ctx, f.game.ID, f.host, round.RoundID, "p"); err != nil {
-			t.Fatalf("Submit() naming the current round error = %v", err)
+
+		again, created, err := submit(f.host, round.RoundID, valid.ID)
+		if err != nil || created || again.ID != sub.ID {
+			t.Errorf("repeated Submit() = %+v, %v, %v; want the same submission, not created", again, created, err)
 		}
-		if err := f.submit(f.host); !errors.Is(err, domain.ErrAlreadySubmitted) {
+		other := f.addTest(f.host, domain.PromptTestCompleted, "second", "out")
+		if _, _, err := submit(f.host, round.RoundID, other.ID); !errors.Is(err, domain.ErrAlreadySubmitted) {
 			t.Errorf("second Submit() error = %v, want ErrAlreadySubmitted", err)
 		}
-		if n := len(f.store.submissions[round.RoundID]); n != 1 {
+		if n := len(f.submissions(round.RoundID)); n != 1 {
 			t.Errorf("stored %d submissions, want only the valid one", n)
 		}
 		if kinds := f.events.kinds(); !slices.Equal(kinds, []string{"player_submitted"}) {
@@ -433,7 +509,8 @@ func TestGameEngineIgnoresStaleRoundEvents(t *testing.T) {
 			t.Errorf("%s(round 1) error = %v, want a silent no-op", name, err)
 		}
 	}
-	if err := f.engine.Submit(ctx, f.game.ID, f.host, first.RoundID, "late"); !errors.Is(err, domain.ErrRoundNotActive) {
+	late := f.addTest(f.host, domain.PromptTestCompleted, "late", "out")
+	if _, _, err := f.engine.Submit(ctx, f.game.ID, f.host, first.RoundID, late.ID); !errors.Is(err, domain.ErrRoundNotActive) {
 		t.Errorf("Submit(round 1) error = %v, want ErrRoundNotActive", err)
 	}
 

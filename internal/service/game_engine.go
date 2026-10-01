@@ -60,6 +60,7 @@ type GameEngine struct {
 	live   LiveStateSyncer
 	logger *log.Logger
 	newID  func() uuid.UUID
+	opts   EngineOptions
 	// background is cancelled by Close; judging runs under it.
 	background context.Context
 	stop       context.CancelFunc
@@ -86,13 +87,29 @@ type engineGame struct {
 	// transaction through the broadcast.
 	transition sync.Mutex
 
-	// The armed round timer, which fires timerExpired for roundID.
+	// The armed timer: it calls fire for roundID at deadline. It is the
+	// round timer (timerExpired) or the results timer (Advance).
 	timer    Timer
 	roundID  uuid.UUID
 	deadline time.Time
 }
 
-func NewGameEngine(tx repository.Transactor, clock Clock, events GameEventPublisher, live LiveStateSyncer, logger *log.Logger) *GameEngine {
+// timerFire is what an armed timer does when it goes off.
+type timerFire func(ctx context.Context, gameID, roundID uuid.UUID) error
+
+// EngineOptions configures the engine.
+type EngineOptions struct {
+	// Random picks each round's challenge; nil uses MathRandom.
+	Random Random
+	// ResultsDuration is how long a round's results are shown before the
+	// game moves on by itself; 0 leaves that to Advance's callers.
+	ResultsDuration time.Duration
+}
+
+func NewGameEngine(tx repository.Transactor, clock Clock, events GameEventPublisher, live LiveStateSyncer, logger *log.Logger, opts EngineOptions) *GameEngine {
+	if opts.Random == nil {
+		opts.Random = MathRandom{}
+	}
 	background, stop := context.WithCancel(context.Background())
 	return &GameEngine{
 		tx:         tx,
@@ -101,6 +118,7 @@ func NewGameEngine(tx repository.Transactor, clock Clock, events GameEventPublis
 		live:       live,
 		logger:     logger,
 		newID:      uuid.New,
+		opts:       opts,
 		background: background,
 		stop:       stop,
 		games:      map[uuid.UUID]*engineGame{},
@@ -141,63 +159,149 @@ func (e *GameEngine) StartGame(ctx context.Context, userID, gameID uuid.UUID, ch
 	})
 }
 
-// Submit records userID's prompt for the round in play and ends the round
-// once every player has submitted. It is refused with domain.ErrRoundNotActive
-// outside an active round, at or after its deadline, or when roundID names
-// another round; uuid.Nil means the current round.
-func (e *GameEngine) Submit(ctx context.Context, gameID, userID, roundID uuid.UUID, prompt string) error {
-	if msg := validateDraft(prompt); msg != "" {
-		return &ValidationError{Fields: map[string]string{"prompt": msg}}
-	}
+// Submit makes the completed prompt test testID userID's final submission for
+// roundID, and ends the round once every player has submitted. It reports
+// false for a repeat of the player's existing submission, which it returns
+// unchanged. It is refused with domain.ErrRoundNotActive outside the round or
+// at its deadline, domain.ErrAlreadySubmitted when the player submitted
+// another test, and domain.ErrInvalidTest when testID is not one of the
+// player's completed tests in the round.
+func (e *GameEngine) Submit(ctx context.Context, gameID, userID, roundID, testID uuid.UUID) (*domain.Submission, bool, error) {
+	var (
+		sub     *domain.Submission
+		created bool
+	)
 	_, err := e.apply(ctx, gameID, func(repos repository.TxRepositories, g *domain.Game, now time.Time) (step, error) {
 		if !g.HasPlayer(userID) {
 			return step{}, domain.ErrNotGamePlayer
 		}
+		existing, err := repos.Submissions.GetForPlayer(ctx, roundID, userID)
+		switch {
+		case err == nil && existing.TestID == testID:
+			sub = existing // a retry of the same request
+			return step{}, nil
+		case err != nil && !errors.Is(err, domain.ErrNotFound):
+			return step{}, err
+		}
 		p := g.Progress
-		if g.Status != domain.GameStatusInProgress || !p.AcceptsSubmissions(now) ||
-			(roundID != uuid.Nil && roundID != p.RoundID) {
+		if g.Status != domain.GameStatusInProgress || p.RoundID != roundID || !p.AcceptsSubmissions(now) {
 			return step{}, domain.ErrRoundNotActive
 		}
-
-		err := repos.Submissions.Create(ctx, domain.Submission{
-			RoundID:     p.RoundID,
-			GameID:      g.ID,
-			RoundNumber: p.CurrentRound,
-			UserID:      userID,
-			Prompt:      prompt,
-			SubmittedAt: now,
-		})
+		if existing != nil {
+			return step{}, domain.ErrAlreadySubmitted
+		}
+		test, err := repos.PromptTests.Get(ctx, testID)
+		if errors.Is(err, domain.ErrNotFound) {
+			return step{}, domain.ErrInvalidTest
+		}
 		if err != nil {
 			return step{}, err
 		}
-		submitted, err := repos.Submissions.CountByRound(ctx, p.RoundID)
+		if test.PlayerID != userID || test.RoundID != roundID || test.Status != domain.PromptTestCompleted {
+			return step{}, domain.ErrInvalidTest
+		}
+
+		sub, created, err = submitTest(ctx, repos, test, domain.SubmissionManual, now)
 		if err != nil {
 			return step{}, err
 		}
-
+		if !created {
+			return step{}, domain.ErrAlreadySubmitted
+		}
+		submitted, err := repos.Submissions.Count(ctx, roundID)
+		if err != nil {
+			return step{}, err
+		}
+		total := len(g.Players)
 		s := step{notify: func(ctx context.Context, game *domain.Game) {
-			e.events.PlayerSubmitted(ctx, game, userID, now)
+			e.events.PlayerSubmitted(ctx, game, userID, submitted, total)
 		}}
 		// Players cannot leave a game in progress, so every player is active.
-		if submitted >= len(g.Players) {
+		if submitted >= total {
 			s.event = domain.GameEventAllSubmitted
 		}
 		return s, nil
 	})
-	return err
+	if err != nil {
+		return nil, false, err
+	}
+	return sub, created, nil
 }
 
-// TimerExpired ends roundID once its deadline has passed. It does nothing when
-// that round is no longer in play, which is how a timer that lost the race to
-// the last submission, or one from an earlier round, is ignored.
+// submitTest writes a submission snapshotting test. It reports false when the
+// player already has a submission for the round, which then stays.
+func submitTest(ctx context.Context, repos repository.TxRepositories, test *domain.PromptTest, source domain.SubmissionSource, now time.Time) (*domain.Submission, bool, error) {
+	count, err := repos.PromptTests.Count(ctx, test.RoundID, test.PlayerID)
+	if err != nil {
+		return nil, false, err
+	}
+	sub := &domain.Submission{
+		GameID: test.GameID, RoundID: test.RoundID, PlayerID: test.PlayerID, TestID: test.ID,
+		Prompt: test.Prompt, PromptLength: domain.PromptLength(test.Prompt), TestCount: count,
+		Source: source, SubmittedAt: now, LockedAt: now,
+	}
+	if test.Output != nil {
+		sub.Output = *test.Output
+	}
+	created, err := repos.Submissions.Create(ctx, sub)
+	return sub, created, err
+}
+
+// TimerExpired ends roundID once its deadline has passed, first submitting
+// each player's last completed test for them if they had not submitted. It
+// does nothing when that round is no longer in play, which is how a timer
+// that lost the race to the last submission, or one from an earlier round,
+// is ignored.
 func (e *GameEngine) TimerExpired(ctx context.Context, gameID, roundID uuid.UUID) error {
-	_, err := e.apply(ctx, gameID, func(_ repository.TxRepositories, g *domain.Game, _ time.Time) (step, error) {
+	_, err := e.apply(ctx, gameID, func(repos repository.TxRepositories, g *domain.Game, now time.Time) (step, error) {
 		if g.Status != domain.GameStatusInProgress || g.Progress.Phase != domain.GamePhaseRoundActive || g.Progress.RoundID != roundID {
 			return step{}, nil
+		}
+		if !now.Before(g.Progress.RoundDeadline) {
+			// In the transaction that ends the round, so every auto-submission
+			// is committed before judging can read submissions.
+			if err := e.autoSubmit(ctx, repos, g, now); err != nil {
+				return step{}, err
+			}
 		}
 		return step{event: domain.GameEventTimerExpired}, nil
 	})
 	return err
+}
+
+// autoSubmit submits the last completed test of every player who has not
+// submitted. A player with no completed test gets no submission; judging
+// scores them as no_submission. A manual submission that won the race keeps
+// its place: the insert does nothing on conflict.
+func (e *GameEngine) autoSubmit(ctx context.Context, repos repository.TxRepositories, g *domain.Game, now time.Time) error {
+	roundID := g.Progress.RoundID
+	var submitted, without int
+	for _, p := range g.Players {
+		_, err := repos.Submissions.GetForPlayer(ctx, roundID, p.UserID)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		test, err := repos.PromptTests.LastCompleted(ctx, roundID, p.UserID)
+		if errors.Is(err, domain.ErrNotFound) {
+			without++
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, created, err := submitTest(ctx, repos, test, domain.SubmissionAuto, now); err != nil {
+			return err
+		} else if created {
+			submitted++
+		}
+	}
+	if submitted+without > 0 {
+		e.logger.Printf("game_engine op=auto_submit game_id=%s round_id=%s submitted=%d without_completed_test=%d", g.ID, roundID, submitted, without)
+	}
+	return nil
 }
 
 // CompleteJudging moves roundID from Judging to Results. It is meant for the
@@ -239,13 +343,16 @@ func (e *GameEngine) roundEvent(ctx context.Context, gameID, roundID uuid.UUID, 
 // instances may recover the same rounds; the compare-and-set lets only one
 // of them end each.
 func (e *GameEngine) Recover(ctx context.Context) error {
-	var games, judging []*domain.Game
+	var games, judging, results []*domain.Game
 	err := e.tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
 		var err error
 		if games, err = repos.Games.ListByPhase(ctx, domain.GamePhaseRoundActive); err != nil {
 			return err
 		}
-		judging, err = repos.Games.ListByPhase(ctx, domain.GamePhaseJudging)
+		if judging, err = repos.Games.ListByPhase(ctx, domain.GamePhaseJudging); err != nil {
+			return err
+		}
+		results, err = repos.Games.ListByPhase(ctx, domain.GamePhaseResults)
 		return err
 	})
 	if err != nil {
@@ -254,6 +361,14 @@ func (e *GameEngine) Recover(ctx context.Context) error {
 	for _, g := range judging {
 		if g.Status == domain.GameStatusInProgress {
 			e.startJudging(g.ID, g.Progress.RoundID)
+		}
+	}
+	if e.opts.ResultsDuration > 0 {
+		// When results began is not stored; they are shown in full again.
+		for _, g := range results {
+			if g.Status == domain.GameStatusInProgress {
+				e.armTimer(g.ID, g.Progress.RoundID, e.clock.Now().Add(e.opts.ResultsDuration), e.clock.Now(), e.Advance)
+			}
 		}
 	}
 
@@ -269,7 +384,7 @@ func (e *GameEngine) Recover(ctx context.Context) error {
 		if now := e.clock.Now(); now.Before(p.RoundDeadline) {
 			eg := e.game(g.ID)
 			eg.transition.Lock()
-			e.armTimer(g.ID, p.RoundID, p.RoundDeadline, now)
+			e.armTimer(g.ID, p.RoundID, p.RoundDeadline, now, e.TimerExpired)
 			eg.transition.Unlock()
 			rearmed++
 			continue
@@ -306,6 +421,28 @@ func (e *GameEngine) Close() {
 	e.mu.Unlock()
 	e.stop()
 	e.inflight.Wait()
+}
+
+// Rejudge judges roundID again, as after a failed run. The judging service
+// checks it may; a round that is held or done is left alone by the claim.
+func (e *GameEngine) Rejudge(gameID, roundID uuid.UUID) {
+	e.startJudging(gameID, roundID)
+}
+
+// pickChallenge chooses the challenge for the game's next round: one for its
+// category and difficulty, avoiding those already played while any remain.
+func (e *GameEngine) pickChallenge(ctx context.Context, repos repository.TxRepositories, g *domain.Game) (uuid.UUID, error) {
+	used, err := repos.Games.ListChallengeIDs(ctx, g.ID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	c, err := NewChallengeFactory(repos.Challenges, e.opts.Random).Create(ctx, ChallengeRequest{
+		Category: g.Settings.Category, Difficulty: g.Settings.Difficulty, UsedChallengeIDs: used,
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return c.ID, nil
 }
 
 // startJudging hands roundID to the judge on its own goroutine.
@@ -356,7 +493,13 @@ func (e *GameEngine) apply(
 		if s.event == "" {
 			return nil
 		}
-		to, err := from.Next(s.event, now, domain.RoundPlan{ID: e.newID(), Length: roundLength(locked.Settings)})
+		plan := domain.RoundPlan{ID: e.newID(), Length: roundLength(locked.Settings)}
+		if s.event == domain.GameEventStartGame || s.event == domain.GameEventNextRound {
+			if plan.ChallengeID, err = e.pickChallenge(ctx, repos, locked); err != nil {
+				return err
+			}
+		}
+		to, err := from.Next(s.event, now, plan)
 		if err != nil {
 			return err
 		}
@@ -365,7 +508,7 @@ func (e *GameEngine) apply(
 		}
 		if to.RoundID != from.RoundID {
 			err := repos.Games.CreateRound(ctx, domain.Round{
-				ID: to.RoundID, GameID: gameID, Number: to.CurrentRound,
+				ID: to.RoundID, GameID: gameID, Number: to.CurrentRound, ChallengeID: to.ChallengeID,
 				StartedAt: to.RoundStartedAt, Deadline: to.RoundDeadline,
 			})
 			if err != nil {
@@ -397,7 +540,9 @@ func (e *GameEngine) committed(ctx context.Context, from domain.GameProgress, ga
 
 	switch {
 	case to.Phase == domain.GamePhaseRoundActive:
-		e.armTimer(game.ID, to.RoundID, to.RoundDeadline, now)
+		e.armTimer(game.ID, to.RoundID, to.RoundDeadline, now, e.TimerExpired)
+	case to.Phase == domain.GamePhaseResults && e.opts.ResultsDuration > 0:
+		e.armTimer(game.ID, to.RoundID, now.Add(e.opts.ResultsDuration), now, e.Advance)
 	case to.Phase == domain.GamePhaseGameOver:
 		e.Forget(game.ID)
 	case from.Phase == domain.GamePhaseRoundActive:
@@ -437,9 +582,9 @@ func (e *GameEngine) game(gameID uuid.UUID) *engineGame {
 	return g
 }
 
-// armTimer (re)arms the game's round timer to fire timerExpired for roundID at
-// deadline, replacing any timer already armed.
-func (e *GameEngine) armTimer(gameID, roundID uuid.UUID, deadline, now time.Time) {
+// armTimer (re)arms the game's timer to call fire for roundID at deadline,
+// replacing any timer already armed.
+func (e *GameEngine) armTimer(gameID, roundID uuid.UUID, deadline, now time.Time, fire timerFire) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -452,7 +597,7 @@ func (e *GameEngine) armTimer(gameID, roundID uuid.UUID, deadline, now time.Time
 	}
 	g.stopTimer()
 	g.roundID, g.deadline = roundID, deadline
-	g.timer = e.clock.AfterFunc(max(deadline.Sub(now), 0), func() { e.onTimer(gameID, roundID) })
+	g.timer = e.clock.AfterFunc(max(deadline.Sub(now), 0), func() { e.onTimer(gameID, roundID, fire) })
 }
 
 func (e *GameEngine) stopTimer(gameID uuid.UUID) {
@@ -463,9 +608,9 @@ func (e *GameEngine) stopTimer(gameID uuid.UUID) {
 	}
 }
 
-// onTimer fires timerExpired for roundID. A failure is retried until the
-// round has ended, because nothing else would end it.
-func (e *GameEngine) onTimer(gameID, roundID uuid.UUID) {
+// onTimer calls fire for roundID. A failure is retried while the timer is
+// still the game's, because nothing else would move the game on.
+func (e *GameEngine) onTimer(gameID, roundID uuid.UUID, fire timerFire) {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -477,11 +622,11 @@ func (e *GameEngine) onTimer(gameID, roundID uuid.UUID) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), engineOpTimeout)
 	defer cancel()
-	err := e.TimerExpired(ctx, gameID, roundID)
+	err := fire(ctx, gameID, roundID)
 	if err == nil {
 		return
 	}
-	e.logger.Printf("game_engine op=timer_expired game_id=%s round_id=%s error=%q", gameID, roundID, err)
+	e.logger.Printf("game_engine op=timer game_id=%s round_id=%s error=%q", gameID, roundID, err)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -495,7 +640,7 @@ func (e *GameEngine) onTimer(gameID, roundID uuid.UUID) {
 	if delay <= 0 {
 		delay = timerRetryDelay
 	}
-	g.timer = e.clock.AfterFunc(delay, func() { e.onTimer(gameID, roundID) })
+	g.timer = e.clock.AfterFunc(delay, func() { e.onTimer(gameID, roundID, fire) })
 }
 
 // stopTimer is called with the engine's mu held.

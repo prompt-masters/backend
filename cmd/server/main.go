@@ -98,7 +98,10 @@ func run(logger *log.Logger) error {
 		return err
 	}
 	gameEvents := service.NewGameEvents(hub, logger, clock.Now)
-	gameEngine := service.NewGameEngine(transactor, clock, gameEvents, liveStateService, logger)
+	gameEngine := service.NewGameEngine(transactor, clock, gameEvents, liveStateService, logger, service.EngineOptions{
+		Random:          service.MathRandom{},
+		ResultsDuration: cfg.ResultsDuration,
+	})
 	defer gameEngine.Close()
 	// Left nil while AI is disabled, so prompt tests answer 503.
 	var promptExecutor service.PromptExecutor
@@ -113,13 +116,11 @@ func run(logger *log.Logger) error {
 		if err != nil {
 			return err
 		}
-		// Rounds do not record their challenge yet, so there is no
-		// RoundChallenges source: judging logs and skips until there is.
-		gameEngine.SetJudge(service.NewRoundJudge(orchestrator, transactor, nil, gameEngine, logger))
+		gameEngine.SetJudge(service.NewRoundJudge(orchestrator, transactor, gameEngine, gameEvents, clock, service.MathRandom{}, logger, cfg.Judging))
 		promptExecutor = orchestrator
 		logger.Printf("ai enabled: executor=%s judge=%s", cfg.AI.Executor.Target, cfg.AI.Judge.Target)
 	} else {
-		logger.Printf("ai disabled (AI_ENABLED is not set): rounds are not judged and prompt tests are refused")
+		logger.Printf("ai disabled (AI_ENABLED is not set): rounds wait in Judging and prompt tests are refused")
 	}
 	promptTestService := service.NewPromptTestService(transactor, promptExecutor, hub, clock, logger, cfg.PromptTests)
 	defer promptTestService.Close()
@@ -134,13 +135,14 @@ func run(logger *log.Logger) error {
 	// deliver client messages, so it is attached once both exist.
 	hub.SetRouter(service.NewWSRouter(liveStateService, gameEngine, hub, logger))
 	gameService := service.NewGameService(transactor, service.MathRandom{}, liveStateService, gameEvents, gameEngine)
+	roundService := service.NewRoundService(transactor, gameEngine)
 	websocketHandler := handler.NewWebSocketHandler(hub, liveStateService, cfg.JWTSecret, cfg.WS.AllowedOrigins, logger)
 
 	healthChecks := []handler.HealthCheck{
 		{Name: "postgres", Critical: true, Check: pool.Ping},
 		{Name: "redis", Check: func(ctx context.Context) error { return redisClient.Ping(ctx).Err() }},
 	}
-	server := api.NewServer(authService, challengeService, gameService, liveStateService, promptTestService, websocketHandler, healthChecks, logger, cfg.JWTSecret)
+	server := api.NewServer(authService, challengeService, gameService, liveStateService, promptTestService, roundService, websocketHandler, healthChecks, logger, cfg.JWTSecret)
 
 	s := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),

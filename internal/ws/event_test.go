@@ -27,6 +27,7 @@ func TestEventTypesMatchTheContract(t *testing.T) {
 		"player_submitted": PlayerSubmittedPayload{},
 		"round_end":        RoundEndPayload{},
 		"round_results":    RoundResultsPayload{},
+		"judging_failed":   JudgingFailedPayload{},
 		"game_end":         GameEndPayload{},
 		"error":            ErrorPayload{},
 	}

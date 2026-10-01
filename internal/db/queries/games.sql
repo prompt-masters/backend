@@ -81,6 +81,7 @@ SET phase               = sqlc.arg(to_phase)::varchar,
     round_id            = sqlc.narg(round_id)::uuid,
     round_started_at_ms = sqlc.narg(round_started_at_ms)::bigint,
     round_deadline_ms   = sqlc.narg(round_deadline_ms)::bigint,
+    round_challenge_id  = sqlc.narg(round_challenge_id)::uuid,
     started_at          = CASE WHEN sqlc.arg(to_status)::varchar = 'in_progress'
                                THEN COALESCE(started_at, NOW()) ELSE started_at END,
     updated_at          = NOW()
@@ -90,7 +91,7 @@ WHERE id = sqlc.arg(id)
   AND round_id IS NOT DISTINCT FROM sqlc.narg(from_round_id)::uuid;
 
 -- name: GetGameProgress :one
-SELECT g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, s.rounds
+SELECT g.phase, g.current_round, g.round_id, g.round_started_at_ms, g.round_deadline_ms, g.round_challenge_id, s.rounds
 FROM games g
 JOIN game_settings s ON s.game_id = g.id
 WHERE g.id = $1;
@@ -103,8 +104,14 @@ WHERE g.phase = $1
 ORDER BY g.id;
 
 -- name: CreateGameRound :exec
-INSERT INTO game_rounds (id, game_id, number, started_at_ms, deadline_ms)
-VALUES ($1, $2, $3, $4, $5);
+INSERT INTO game_rounds (id, game_id, number, started_at_ms, deadline_ms, challenge_id)
+VALUES ($1, $2, $3, $4, $5, $6);
+
+-- name: ListGameChallengeIDs :many
+-- The challenges already played in a game, so a new round avoids them.
+SELECT challenge_id::uuid FROM game_rounds
+WHERE game_id = $1 AND challenge_id IS NOT NULL
+ORDER BY number;
 
 -- name: GetGameRound :one
 SELECT * FROM game_rounds WHERE id = $1;

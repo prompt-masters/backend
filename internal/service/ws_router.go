@@ -77,23 +77,25 @@ func (r *WSRouter) playerReady(ctx context.Context, in ws.Inbound) {
 	r.hub.Broadcast(in.GameID, msg)
 }
 
-// submitPrompt hands the player's final prompt to the game engine, which
-// announces it to the room without its text.
+// submitPrompt makes one of the player's completed tests their final
+// submission; the room hears of it by count only.
 func (r *WSRouter) submitPrompt(ctx context.Context, in ws.Inbound) {
 	var payload ws.ClientSubmitPrompt
 	if err := json.Unmarshal(in.Payload, &payload); err != nil {
 		in.Reply(ws.ErrorPayload{Code: ws.CodeInvalidPayload, Message: "submit_prompt payload must be an object."})
 		return
 	}
-	var roundID uuid.UUID
-	if payload.RoundID != "" {
-		var err error
-		if roundID, err = uuid.Parse(payload.RoundID); err != nil {
-			in.Reply(ws.ErrorPayload{Code: ws.CodeInvalidPayload, Message: "round_id must be a UUID."})
-			return
-		}
+	roundID, err := uuid.Parse(payload.RoundID)
+	if err != nil {
+		in.Reply(ws.ErrorPayload{Code: ws.CodeInvalidPayload, Message: "round_id must be a UUID."})
+		return
 	}
-	if err := r.engine.Submit(ctx, in.GameID, in.UserID, roundID, payload.Prompt); err != nil {
+	testID, err := uuid.Parse(payload.TestID)
+	if err != nil {
+		in.Reply(ws.ErrorPayload{Code: ws.CodeInvalidPayload, Message: "test_id must be a UUID."})
+		return
+	}
+	if _, _, err := r.engine.Submit(ctx, in.GameID, in.UserID, roundID, testID); err != nil {
 		in.Reply(r.errorFor(err, in))
 	}
 }
@@ -126,6 +128,8 @@ func (r *WSRouter) errorFor(err error, in ws.Inbound) ws.ErrorPayload {
 		return ws.ErrorPayload{Code: ws.CodeNotAllowed, Message: "The round is not accepting submissions."}
 	case errors.Is(err, domain.ErrAlreadySubmitted):
 		return ws.ErrorPayload{Code: ws.CodeNotAllowed, Message: "You have already submitted this round."}
+	case errors.Is(err, domain.ErrInvalidTest):
+		return ws.ErrorPayload{Code: ws.CodeInvalidPayload, Message: "Submit one of your completed tests from this round."}
 	case errors.Is(err, domain.ErrNotFound), errors.Is(err, domain.ErrStateNotFound):
 		return ws.ErrorPayload{Code: ws.CodeNotAllowed, Message: "The game was not found."}
 	case errors.Is(err, domain.ErrStateUnavailable):

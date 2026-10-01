@@ -46,3 +46,16 @@ ORDER BY test_number;
 UPDATE prompt_tests
 SET status = 'failed', error_code = 'INTERRUPTED', completed_at_ms = sqlc.arg(now_ms)
 WHERE status IN ('pending', 'streaming') AND created_at_ms < sqlc.arg(before_ms);
+
+-- name: GetPromptTest :one
+SELECT * FROM prompt_tests WHERE id = $1;
+
+-- name: CountPromptTests :one
+-- Every attempt counts, whatever its status.
+SELECT COUNT(*)::int FROM prompt_tests WHERE round_id = $1 AND player_id = $2;
+
+-- name: LastCompletedPromptTest :one
+SELECT * FROM prompt_tests
+WHERE round_id = $1 AND player_id = $2 AND status = 'completed'
+ORDER BY test_number DESC
+LIMIT 1;
