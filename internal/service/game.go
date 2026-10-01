@@ -20,12 +20,21 @@ const (
 	gameListLimit       = 100
 )
 
-// GameEventPublisher announces lobby changes to the game's room. It is best
+// GameEventPublisher announces game changes to the game's room. It is best
 // effort: publishing never fails a change that is already committed.
 type GameEventPublisher interface {
 	PlayerJoined(ctx context.Context, game *domain.Game, userID uuid.UUID)
 	PlayerLeft(ctx context.Context, game *domain.Game, userID uuid.UUID, username string, hostChanged bool)
 	GameUpdated(ctx context.Context, game *domain.Game)
+	// PlayerSubmitted announces a submission by count, never its content.
+	PlayerSubmitted(ctx context.Context, game *domain.Game, userID uuid.UUID, submitted, total int)
+	// RoundEnded announces that the round in game.Progress stopped taking
+	// submissions; reason is RoundEndAllSubmitted or RoundEndTimeExpired.
+	RoundEnded(ctx context.Context, game *domain.Game, reason string)
+	// RoundResults publishes a round's results to the whole room.
+	RoundResults(ctx context.Context, gameID uuid.UUID, results domain.RoundResults)
+	// JudgingFailed reports that judging roundID failed.
+	JudgingFailed(ctx context.Context, gameID, roundID uuid.UUID, retryable bool)
 }
 
 type GameSettingsInput struct {
@@ -47,17 +56,21 @@ type GameSettingsInput struct {
 //
 // After a change commits, the resulting game is mirrored into live state
 // through the LiveStateSyncer, best effort.
+//
+// Starting a game is a game engine transition, so Start hands it to the
+// GameEngine, which applies the same locking.
 type GameService struct {
 	tx     repository.Transactor
 	random Random
 	live   LiveStateSyncer
 	events GameEventPublisher
+	engine *GameEngine
 }
 
 // NewGameService uses random for room codes and for the ChallengeFactory that
 // checks a game can start.
-func NewGameService(tx repository.Transactor, random Random, live LiveStateSyncer, events GameEventPublisher) *GameService {
-	return &GameService{tx: tx, random: random, live: live, events: events}
+func NewGameService(tx repository.Transactor, random Random, live LiveStateSyncer, events GameEventPublisher, engine *GameEngine) *GameService {
+	return &GameService{tx: tx, random: random, live: live, events: events, engine: engine}
 }
 
 // List returns up to gameListLimit games in the given status, newest first.
@@ -224,26 +237,17 @@ func (s *GameService) Leave(ctx context.Context, userID uuid.UUID, ref string) e
 	return nil
 }
 
-// Start moves a waiting game to in_progress once the host asks and the game
-// is ready: see checkReadyToStart.
+// Start begins the first round of a waiting game once the host asks and the
+// game is ready (see checkReadyToStart). The game engine applies it, mirrors
+// it into live state and publishes it.
 func (s *GameService) Start(ctx context.Context, userID uuid.UUID, ref string) (*domain.Game, error) {
-	game, err := s.mutate(ctx, ref, func(repos repository.TxRepositories, g *domain.Game) error {
-		if !g.IsHost(userID) {
-			return domain.ErrNotGameHost
-		}
-		if g.Status != domain.GameStatusWaiting {
-			return domain.ErrGameNotWaiting
-		}
-		if err := s.checkReadyToStart(ctx, repos.Challenges, g); err != nil {
-			return err
-		}
-		return repos.Games.UpdateStatus(ctx, g.ID, domain.GameStatusInProgress)
-	})
+	id, err := s.resolve(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
-	s.events.GameUpdated(ctx, game)
-	return game, nil
+	return s.engine.StartGame(ctx, userID, id, func(ctx context.Context, repos repository.TxRepositories, g *domain.Game) error {
+		return s.checkReadyToStart(ctx, repos.Challenges, g)
+	})
 }
 
 // Cancel ends a waiting or in-progress game. Only the host may cancel; the
@@ -261,6 +265,7 @@ func (s *GameService) Cancel(ctx context.Context, userID uuid.UUID, ref string) 
 	if err != nil {
 		return err
 	}
+	s.engine.Forget(game.ID)
 	s.events.GameUpdated(ctx, game)
 	return nil
 }
@@ -314,6 +319,17 @@ func (s *GameService) mutate(
 	}
 	s.live.SyncGame(ctx, game)
 	return game, nil
+}
+
+// resolve turns a game reference into the game's ID without locking it.
+func (s *GameService) resolve(ctx context.Context, ref string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.tx.WithinTx(ctx, func(repos repository.TxRepositories) error {
+		var err error
+		id, err = resolveGameID(ctx, repos.Games, ref)
+		return err
+	})
+	return id, err
 }
 
 func (s *GameService) createWithUniqueRoomCode(ctx context.Context, repo repository.GameRepository, hostID uuid.UUID) (*domain.Game, error) {

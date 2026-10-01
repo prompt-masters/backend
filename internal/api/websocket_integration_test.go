@@ -260,6 +260,84 @@ func TestWebSocketFirstEventIsTheCallersOwnState(t *testing.T) {
 	}
 }
 
+// TestWebSocketRoundLifecycle plays a round through the real stack: every
+// client gets the same stored deadline, a reconnect gets it unchanged, and
+// the last submission ends the round early.
+func TestWebSocketRoundLifecycle(t *testing.T) {
+	a := newLiveTestAPI(t)
+	host, guest := a.user("host"), a.user("guest")
+	g := a.createGame(host, 4, guest)
+	hostConn := a.connect(host, g.ID)
+	guestConn := a.connect(guest, g.ID)
+	for _, c := range []*wsClient{hostConn, guestConn} {
+		lobby := decodePayload[ws.GameStatePayload](t, c.nextOfType(t, ws.TypeGameState, 3*time.Second))
+		if lobby.State != "Lobby" || lobby.RoundDeadline != 0 || lobby.ServerTime == 0 {
+			t.Fatalf("connect game_state = %+v, want the lobby with a server time", lobby)
+		}
+	}
+
+	before := time.Now().UnixMilli()
+	a.expect(http.StatusOK, "POST", "/api/v1/games/"+g.ID+"/start", &host, nil)
+	var started []ws.GameStatePayload
+	for _, c := range []*wsClient{hostConn, guestConn} {
+		started = append(started, decodePayload[ws.GameStatePayload](t, c.nextOfType(t, ws.TypeGameState, 3*time.Second)))
+	}
+	round := started[0]
+	if round.State != "RoundActive" || round.CurrentRound != 1 || round.TotalRounds != 5 || round.RoundID == "" {
+		t.Fatalf("game_state after start = %+v, want round 1 of 5 active", round)
+	}
+	if round.RoundStartedAt < before || round.RoundDeadline-round.RoundStartedAt != 90_000 {
+		t.Errorf("round timing = %d..%d, want 90s from the start request", round.RoundStartedAt, round.RoundDeadline)
+	}
+	if other := started[1]; other.RoundID != round.RoundID || other.RoundDeadline != round.RoundDeadline {
+		t.Errorf("clients got different rounds: %+v vs %+v", other, round)
+	}
+
+	// A refresh, over WebSocket or REST, gets the stored round back; a reset
+	// would have started a new round with a new ID and deadline.
+	refreshed := decodePayload[ws.GameStatePayload](t, a.connect(guest, g.ID).nextOfType(t, ws.TypeGameState, 3*time.Second))
+	if refreshed.RoundID != round.RoundID || refreshed.RoundDeadline != round.RoundDeadline || refreshed.ServerTime < round.ServerTime {
+		t.Errorf("reconnect game_state = %+v, want round %s due at %d", refreshed, round.RoundID, round.RoundDeadline)
+	}
+	live := decode[struct {
+		State         string `json:"state"`
+		RoundID       string `json:"round_id"`
+		RoundDeadline int64  `json:"round_deadline"`
+	}](t, a.expect(http.StatusOK, "GET", "/api/v1/games/"+g.ID+"/live", &host, nil))
+	if live.State != "RoundActive" || live.RoundID != round.RoundID || live.RoundDeadline != round.RoundDeadline {
+		t.Errorf("GET /live = %+v, want the stored round", live)
+	}
+
+	// Each player tests a prompt, then submits that test.
+	for _, p := range []struct {
+		user testUser
+		conn *wsClient
+	}{{host, hostConn}, {guest, guestConn}} {
+		test := decode[struct {
+			TestID string `json:"test_id"`
+		}](t, a.expect(http.StatusAccepted, "POST", "/api/v1/rounds/"+round.RoundID+"/test", &p.user, map[string]any{"prompt": "a prompt"}))
+		p.conn.nextOfType(t, ws.TypeOutputComplete, 3*time.Second)
+		p.conn.send(t, `{"type":"submit_prompt","payload":{"round_id":"`+round.RoundID+`","test_id":"`+test.TestID+`"}}`)
+	}
+	for _, c := range []*wsClient{hostConn, guestConn} {
+		end := decodePayload[ws.RoundEndPayload](t, c.nextOfType(t, ws.TypeRoundEnd, 3*time.Second))
+		if end.RoundID != round.RoundID || end.Reason != "all_submitted" {
+			t.Errorf("round_end = %+v, want round %s ended by all_submitted", end, round.RoundID)
+		}
+		judging := decodePayload[ws.GameStatePayload](t, c.nextOfType(t, ws.TypeGameState, 3*time.Second))
+		if judging.State != "Judging" || judging.RoundID != round.RoundID {
+			t.Errorf("game_state after the last submission = %+v, want Judging", judging)
+		}
+	}
+
+	// The round is over: a late submission is refused.
+	guestConn.send(t, `{"type":"submit_prompt","payload":{"round_id":"`+round.RoundID+`","test_id":"`+uuid.NewString()+`"}}`)
+	refused := decodePayload[ws.ErrorPayload](t, guestConn.nextOfType(t, ws.TypeError, 3*time.Second))
+	if refused.Code != ws.CodeNotAllowed {
+		t.Errorf("late submission error = %+v, want not_allowed", refused)
+	}
+}
+
 func TestWebSocketBroadcastsReachTheWholeRoomOnly(t *testing.T) {
 	a := newLiveTestAPI(t)
 	host, guest, third := a.user("host"), a.user("guest"), a.user("third")
@@ -338,10 +416,11 @@ func TestWebSocketClientMessages(t *testing.T) {
 		}
 	})
 
-	t.Run("unsupported and unknown events answer with an error", func(t *testing.T) {
+	t.Run("unsupported, unknown and refused events answer with an error", func(t *testing.T) {
 		for raw, wantCode := range map[string]string{
-			`{"type":"prompt_test","payload":{"prompt":"hi"}}`:   ws.CodeUnsupportedEvent,
-			`{"type":"submit_prompt","payload":{"prompt":"hi"}}`: ws.CodeUnsupportedEvent,
+			`{"type":"prompt_test","payload":{"prompt":"hi"}}`: ws.CodeUnsupportedEvent,
+			// No round is in play before the game starts.
+			`{"type":"submit_prompt","payload":{"prompt":"hi"}}`: ws.CodeInvalidPayload,
 			`{"type":"nonsense","payload":{}}`:                   ws.CodeUnknownEvent,
 			`not json at all`:                                    ws.CodeMalformedMessage,
 		} {
