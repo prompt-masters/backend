@@ -11,7 +11,7 @@ CREATE TABLE helper_balances (
     CONSTRAINT helper_balances_balance_check CHECK (balance >= 0)
 );
 
--- Every paid helper request: reserved when the points are taken, then
+-- Every paid helper request: pending once the points are taken, then
 -- delivered or refunded. Refunded rows are kept as an audit trail.
 -- Timestamps are UTC Unix milliseconds.
 CREATE TABLE helper_usage (
@@ -22,7 +22,7 @@ CREATE TABLE helper_usage (
     helper_type     VARCHAR(16)      NOT NULL,
     -- The price when it was bought.
     cost            INT              NOT NULL,
-    status          VARCHAR(16)      NOT NULL DEFAULT 'reserved',
+    status          VARCHAR(16)      NOT NULL DEFAULT 'pending',
     idempotency_key VARCHAR(128)     NOT NULL,
     input_prompt    TEXT,
     test_id         UUID             REFERENCES prompt_tests(id),
@@ -40,13 +40,13 @@ CREATE TABLE helper_usage (
     -- A retried request (same key) is never charged twice.
     CONSTRAINT helper_usage_player_id_idempotency_key_key UNIQUE (player_id, idempotency_key),
     CONSTRAINT helper_usage_type_check CHECK (helper_type IN ('hint', 'suggestion', 'review')),
-    CONSTRAINT helper_usage_status_check CHECK (status IN ('reserved', 'delivered', 'refunded')),
+    CONSTRAINT helper_usage_status_check CHECK (status IN ('pending', 'delivered', 'refunded')),
     CONSTRAINT helper_usage_cost_check CHECK (cost >= 0)
 );
 
-CREATE INDEX helper_usage_round_player_idx ON helper_usage (round_id, player_id, created_at_ms);
+CREATE INDEX helper_usage_player_round_idx ON helper_usage (player_id, round_id, created_at_ms);
 -- Finds reservations left behind, for refunding.
-CREATE INDEX helper_usage_reserved_idx ON helper_usage (created_at_ms) WHERE status = 'reserved';
+CREATE INDEX helper_usage_pending_idx ON helper_usage (created_at_ms) WHERE status = 'pending';
 
 -- +goose Down
 DROP TABLE IF EXISTS helper_usage;

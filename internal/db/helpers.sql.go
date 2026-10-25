@@ -106,7 +106,7 @@ UPDATE helper_usage
 SET status = 'delivered', content = $1, delivered_at_ms = $2,
     provider = $3, model = $4,
     input_tokens = $5, output_tokens = $6, cost_usd = $7
-WHERE id = $8 AND status = 'reserved'
+WHERE id = $8 AND status = 'pending'
 `
 
 type DeliverHelperUsageParams struct {
@@ -299,7 +299,7 @@ func (q *Queries) ListHelperUsage(ctx context.Context, arg ListHelperUsageParams
 
 const ListStaleHelperReservations = `-- name: ListStaleHelperReservations :many
 SELECT id, game_id, round_id, player_id, helper_type, cost, status, idempotency_key, input_prompt, test_id, content, error_code, provider, model, input_tokens, output_tokens, cost_usd, created_at_ms, delivered_at_ms, refunded_at_ms FROM helper_usage
-WHERE status = 'reserved' AND created_at_ms < $1
+WHERE status = 'pending' AND created_at_ms < $1
 ORDER BY created_at_ms
 `
 
@@ -347,7 +347,7 @@ func (q *Queries) ListStaleHelperReservations(ctx context.Context, createdAtMs i
 const RefundHelperUsage = `-- name: RefundHelperUsage :execrows
 UPDATE helper_usage
 SET status = 'refunded', error_code = $1, refunded_at_ms = $2
-WHERE id = $3 AND status = 'reserved'
+WHERE id = $3 AND status = 'pending'
 `
 
 type RefundHelperUsageParams struct {

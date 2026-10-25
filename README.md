@@ -594,12 +594,12 @@ and an **`Idempotency-Key`** header (required) answers `200`:
 | 503 | `AI_UNAVAILABLE` | AI is disabled |
 
 - **Charging:** one short transaction checks the request, inserts a
-  `reserved` `helper_usage` row and takes the points with
+  `pending` `helper_usage` row and takes the points with
   `UPDATE ... WHERE balance >= cost` (backed by `CHECK (balance >= 0)`). The
   AI runs after the commit, with no lock held. Delivery is recorded in a
   transaction before the content is returned; any failure (AI error, timeout,
   empty output, the round ending, a failed write) refunds instead. A refund
-  only happens from `reserved`, so it happens once. Reservations older than the
+  only happens from `pending`, so it happens once. Reservations older than the
   helper timeout plus 30s are refunded on start and every
   `HELPER_RECOVERY_INTERVAL`.
 - **Idempotency:** a repeated key returns the first request's outcome

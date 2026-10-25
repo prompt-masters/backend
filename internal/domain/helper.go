@@ -34,16 +34,16 @@ func (t HelperType) Valid() bool {
 type HelperStatus string
 
 const (
-	// HelperReserved means the points are taken and the helper is running.
-	HelperReserved  HelperStatus = "reserved"
+	// HelperPending means the points are taken and the helper is running.
+	HelperPending   HelperStatus = "pending"
 	HelperDelivered HelperStatus = "delivered"
 	// HelperRefunded means the helper was not delivered and the points were
 	// given back.
 	HelperRefunded HelperStatus = "refunded"
 )
 
-// HelperUsage is one paid helper request. It is created when the points are
-// reserved and ends delivered or refunded; it is never deleted.
+// HelperUsage is one paid helper request. It is created pending when the points
+// are reserved and ends delivered or refunded; it is never deleted.
 type HelperUsage struct {
 	ID             uuid.UUID
 	GameID         uuid.UUID

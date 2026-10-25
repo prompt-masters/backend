@@ -419,7 +419,7 @@ func (r fakeJudgingRepo) ListScores(_ context.Context, roundID uuid.UUID) ([]dom
 }
 
 // fakeHelperRepo follows the PostgreSQL rules: a conditional debit, one
-// usage per player and key, and status changes only from reserved.
+// usage per player and key, and status changes only from pending.
 type fakeHelperRepo struct{ s *fakeGameStore }
 
 func (r fakeHelperRepo) EnsureBalance(_ context.Context, gameID, playerID uuid.UUID, balance int, _ time.Time) error {
@@ -492,7 +492,7 @@ func (r fakeHelperRepo) Deliver(_ context.Context, id uuid.UUID, d domain.Helper
 		return errors.New("database unavailable")
 	}
 	u, ok := r.s.helperUsage[id]
-	if !ok || u.Status != domain.HelperReserved {
+	if !ok || u.Status != domain.HelperPending {
 		return domain.ErrStaleGameState
 	}
 	u.Status, u.Content, u.Provider, u.Model, u.DeliveredAt = domain.HelperDelivered, d.Content, d.Provider, d.Model, &d.DeliveredAt
@@ -501,7 +501,7 @@ func (r fakeHelperRepo) Deliver(_ context.Context, id uuid.UUID, d domain.Helper
 
 func (r fakeHelperRepo) MarkRefunded(_ context.Context, id uuid.UUID, code string, at time.Time) (bool, error) {
 	u, ok := r.s.helperUsage[id]
-	if !ok || u.Status != domain.HelperReserved {
+	if !ok || u.Status != domain.HelperPending {
 		return false, nil
 	}
 	u.Status, u.ErrorCode, u.RefundedAt = domain.HelperRefunded, code, &at
@@ -522,7 +522,7 @@ func (r fakeHelperRepo) ListUsage(_ context.Context, roundID, playerID uuid.UUID
 func (r fakeHelperRepo) ListStaleReservations(_ context.Context, before time.Time) ([]domain.HelperUsage, error) {
 	out := []domain.HelperUsage{}
 	for _, u := range r.s.helperUsage {
-		if u.Status == domain.HelperReserved && u.CreatedAt.Before(before) {
+		if u.Status == domain.HelperPending && u.CreatedAt.Before(before) {
 			out = append(out, *u)
 		}
 	}

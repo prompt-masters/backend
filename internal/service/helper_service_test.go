@@ -374,9 +374,9 @@ func TestHelperRecoveryRefundsStaleReservationsOnce(t *testing.T) {
 	now := f.clock.Now()
 	f.store.mu.Lock()
 	stale := &domain.HelperUsage{ID: uuid.New(), GameID: f.game.ID, RoundID: f.round.RoundID, PlayerID: f.host, Type: domain.HelperReview,
-		Cost: 15, Status: domain.HelperReserved, IdempotencyKey: "old", CreatedAt: now.Add(-time.Hour)}
+		Cost: 15, Status: domain.HelperPending, IdempotencyKey: "old", CreatedAt: now.Add(-time.Hour)}
 	fresh := &domain.HelperUsage{ID: uuid.New(), GameID: f.game.ID, RoundID: f.round.RoundID, PlayerID: f.guest, Type: domain.HelperHint,
-		Cost: 10, Status: domain.HelperReserved, IdempotencyKey: "new", CreatedAt: now}
+		Cost: 10, Status: domain.HelperPending, IdempotencyKey: "new", CreatedAt: now}
 	f.store.helperUsage[stale.ID], f.store.helperUsage[fresh.ID] = stale, fresh
 	f.store.balances[[2]uuid.UUID{f.game.ID, f.host}] = 85 // the stale one was paid for
 	f.store.balances[[2]uuid.UUID{f.game.ID, f.guest}] = 90
@@ -404,7 +404,7 @@ func TestHelperRecoveryRefundsStaleReservationsOnce(t *testing.T) {
 	}
 	f.store.mu.Lock()
 	defer f.store.mu.Unlock()
-	if f.store.helperUsage[stale.ID].Status != domain.HelperRefunded || f.store.helperUsage[fresh.ID].Status != domain.HelperReserved {
+	if f.store.helperUsage[stale.ID].Status != domain.HelperRefunded || f.store.helperUsage[fresh.ID].Status != domain.HelperPending {
 		t.Error("recovery refunded the wrong reservation")
 	}
 }

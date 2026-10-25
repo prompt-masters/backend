@@ -234,7 +234,7 @@ func (s *HelperService) reserve(ctx context.Context, userID, roundID, testID uui
 		}
 		r.usage = domain.HelperUsage{
 			GameID: game.ID, RoundID: roundID, PlayerID: userID, Type: req.Type, Cost: cost,
-			Status: domain.HelperReserved, IdempotencyKey: req.IdempotencyKey, InputPrompt: req.Prompt,
+			Status: domain.HelperPending, IdempotencyKey: req.IdempotencyKey, InputPrompt: req.Prompt,
 			TestID: testID, CreatedAt: now,
 		}
 		created, err := repos.Helpers.CreateUsage(ctx, &r.usage)
@@ -348,7 +348,7 @@ func (s *HelperService) refund(u domain.HelperUsage, code string) error {
 }
 
 // refundIn marks u refunded and credits its cost, only if it was still
-// reserved, so a refund never happens twice.
+// pending, so a refund never happens twice.
 func (s *HelperService) refundIn(ctx context.Context, repos repository.TxRepositories, u domain.HelperUsage, code string) (int, error) {
 	now := s.clock.Now()
 	flipped, err := repos.Helpers.MarkRefunded(ctx, u.ID, code, now)

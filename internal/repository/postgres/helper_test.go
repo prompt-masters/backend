@@ -109,7 +109,7 @@ func TestHelperUsageLifecycle(t *testing.T) {
 	}
 
 	got, err := repo.GetUsageByKey(ctx, f.host, "key-1")
-	if err != nil || got.ID != u.ID || got.Status != domain.HelperReserved || got.TestID != test.ID || got.Cost != 15 || got.InputPrompt != "draft" {
+	if err != nil || got.ID != u.ID || got.Status != domain.HelperPending || got.TestID != test.ID || got.Cost != 15 || got.InputPrompt != "draft" {
 		t.Fatalf("GetUsageByKey() = %+v, %v", got, err)
 	}
 	cost := 0.002
@@ -128,7 +128,7 @@ func TestHelperUsageLifecycle(t *testing.T) {
 		t.Errorf("ListUsage() = %+v", list)
 	}
 	if stale, _ := repo.ListStaleReservations(ctx, now.Add(time.Hour)); len(stale) != 1 || stale[0].ID != other.ID {
-		t.Errorf("stale reservations = %+v, want the guest's reserved one", stale)
+		t.Errorf("stale reservations = %+v, want the guest's pending one", stale)
 	}
 }
 

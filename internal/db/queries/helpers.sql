@@ -37,13 +37,13 @@ UPDATE helper_usage
 SET status = 'delivered', content = sqlc.arg(content), delivered_at_ms = sqlc.arg(delivered_at_ms),
     provider = sqlc.narg(provider), model = sqlc.narg(model),
     input_tokens = sqlc.narg(input_tokens), output_tokens = sqlc.narg(output_tokens), cost_usd = sqlc.narg(cost_usd)
-WHERE id = sqlc.arg(id) AND status = 'reserved';
+WHERE id = sqlc.arg(id) AND status = 'pending';
 
 -- name: RefundHelperUsage :execrows
 -- Only a reservation can be refunded, so a refund happens at most once.
 UPDATE helper_usage
 SET status = 'refunded', error_code = sqlc.arg(error_code), refunded_at_ms = sqlc.arg(refunded_at_ms)
-WHERE id = sqlc.arg(id) AND status = 'reserved';
+WHERE id = sqlc.arg(id) AND status = 'pending';
 
 -- name: ListHelperUsage :many
 SELECT * FROM helper_usage
@@ -52,5 +52,5 @@ ORDER BY created_at_ms, id;
 
 -- name: ListStaleHelperReservations :many
 SELECT * FROM helper_usage
-WHERE status = 'reserved' AND created_at_ms < $1
+WHERE status = 'pending' AND created_at_ms < $1
 ORDER BY created_at_ms;
