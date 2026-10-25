@@ -544,7 +544,14 @@ func TestWebSocketSlowClientDoesNotStallTheRoom(t *testing.T) {
 }
 
 func TestWebSocketConcurrentClients(t *testing.T) {
-	a := newLiveTestAPI(t)
+	// A connection here is sent at most 5 other players x 10 typing events
+	// plus a few lobby events. A buffer that holds them all keeps this test
+	// about concurrency: with the usual 8, a writer descheduled on a busy
+	// machine is rightly dropped as slow (that is
+	// TestWebSocketSlowClientDoesNotStallTheRoom's subject).
+	cfg := testHubConfig()
+	cfg.SendBuffer = 128
+	a := newLiveTestAPIWithHub(t, cfg)
 	host := a.user("host")
 	g := a.createGame(host, 6)
 	gameID := uuid.MustParse(g.ID)

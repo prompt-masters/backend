@@ -65,6 +65,12 @@ func newTestAPI(t *testing.T) *testAPI {
 // keyPrefix and lobby changes are mirrored into it.
 func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix string) *testAPI {
 	t.Helper()
+	return buildTestAPIWithHub(t, redisClient, keyPrefix, testHubConfig())
+}
+
+// buildTestAPIWithHub is buildTestAPI with its own hub configuration.
+func buildTestAPIWithHub(t *testing.T, redisClient redis.UniversalClient, keyPrefix string, hubCfg ws.Config) *testAPI {
+	t.Helper()
 	pool := pgtest.NewPool(t)
 	queries := db.New(pool)
 	ctx := context.Background()
@@ -99,7 +105,7 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 	challengeService := service.NewChallengeService(challengeRepo)
 	transactor := postgres.NewTransactor(pool)
 
-	hub, err := ws.NewHub(testHubConfig(), nil, logger)
+	hub, err := ws.NewHub(hubCfg, nil, logger)
 	if err != nil {
 		t.Fatalf("creating hub: %v", err)
 	}
