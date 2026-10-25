@@ -1,0 +1,172 @@
+# Pull requests: lint -> unit tests -> integration tests -> build.
+# Push to main (a merge): build -> deploy -> migration -> health check, with a
+# rollback of the deploy if anything after it fails.
+# Each job runs only if the one before it passed.
+name: Backend
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: backend-${{ github.event_name }}-${{ github.ref }}
+  # A newer PR push supersedes the older run; deploys are never cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  SQLC_VERSION: v1.31.1
+  GOOSE_VERSION: v3.28.0
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install sqlc
+        run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@"${SQLC_VERSION}"
+      - name: gofmt, go vet, sqlc diff
+        run: make lint
+
+  unit:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: make test-unit
+
+  integration:
+    needs: unit
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: prompters_test_db
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d prompters_test_db"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/prompters_test_db?sslmode=disable
+      TEST_REDIS_ADDR: localhost:6379
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: make test-integration
+
+  build:
+    needs: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - name: Build the image
+        run: docker build -t "$IMAGE:${{ github.sha }}" .
+
+  image:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and push the image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:main" .
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:main"
+
+  # Deploying is off until the repository variable DEPLOY_ENABLED is "true";
+  # until then deploy, migration and health check show as skipped.
+  deploy:
+    needs: image
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Trigger the deploy
+        env:
+          DEPLOY_WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
+          DEPLOY_WEBHOOK_TOKEN: ${{ secrets.DEPLOY_WEBHOOK_TOKEN }}
+        run: |
+          curl -fsS --max-time 60 -X POST "$DEPLOY_WEBHOOK_URL" \
+            -H "Authorization: Bearer $DEPLOY_WEBHOOK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"image\": \"$IMAGE:${{ github.sha }}\"}"
+
+  # Runs after the deploy, so every migration must be backward compatible
+  # (additive): the new code briefly runs against the old schema.
+  migrate:
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install goose
+        run: go install github.com/pressly/goose/v3/cmd/goose@"${GOOSE_VERSION}"
+      - name: Apply migrations
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: goose -dir internal/db/migrations postgres "$DATABASE_URL" up
+
+  health-check:
+    needs: migrate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Wait for /health
+        run: ./scripts/healthcheck.sh "${{ vars.HEALTHCHECK_URL }}" 6 5
+
+  # Redeploys the previous image when the deploy went out but a later step
+  # failed. Migrations are not rolled back: being additive, the previous code
+  # still works with the new schema.
+  rollback:
+    needs: [deploy, migrate, health-check]
+    if: failure() && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Redeploy the previous image
+        env:
+          DEPLOY_WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
+          DEPLOY_WEBHOOK_TOKEN: ${{ secrets.DEPLOY_WEBHOOK_TOKEN }}
+          PREVIOUS: ${{ github.event.before }}
+        run: |
+          curl -fsS --max-time 60 -X POST "$DEPLOY_WEBHOOK_URL" \
+            -H "Authorization: Bearer $DEPLOY_WEBHOOK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"image\": \"$IMAGE:$PREVIOUS\"}"
+          echo "::warning::Rolled back to $IMAGE:$PREVIOUS"
