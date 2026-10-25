@@ -278,6 +278,8 @@ access token; no route accepts a user ID.
 | `GET` | `/api/v1/submissions/{id}` | 200 | Yours any time; others' once the round's results are out |
 | `GET` | `/api/v1/submissions/{id}/score` | 200 | Scores, rank and rationale once results are out |
 | `POST` | `/api/v1/rounds/{id}/judge/retry` | 202 | Host only, after judging failed |
+| `POST` | `/api/v1/rounds/{id}/helpers/{hint,suggestion,review}` | 200 | Paid AI helper; see [Helpers](#helpers) |
+| `GET` | `/api/v1/rounds/{id}/helpers` | 200 | Your balance, the prices and your own helper use this round |
 
 Only players of the game get live state (403 otherwise). A player can never
 read another player's draft. 503 means Redis is unavailable; retry later.
@@ -565,6 +567,53 @@ After the scores commit, the round moves to `Results` and the room receives
 first moment opponents' work is shown. A reconnect during `Results` gets the
 same results in `game_state.round_results`. After `RESULTS_DURATION` the next
 round starts, or the game ends after the last.
+
+## Helpers
+
+During `RoundActive` a player can buy AI help with helper points: **100 per
+game** (shared by all rounds), set when the game starts.
+
+| Helper | Price | Gives |
+| --- | --- | --- |
+| `hint` | 10 | A short nudge about what the task needs; never a prompt |
+| `suggestion` | 10 (not in the SRS; configurable) | 1–3 concrete edits to your draft (`prompt` required) |
+| `review` | 15 | Strengths, weaknesses and likely scoring issues of your prompt and, with `test_id`, its output |
+
+`POST /api/v1/rounds/{id}/helpers/hint` with `{"prompt": "...", "test_id": "..."}`
+and an **`Idempotency-Key`** header (required) answers `200`:
+`{"data": {"usage_id", "helper_type", "cost", "content", "remaining_balance"}}`.
+
+| Status | `error_code` | When |
+| --- | --- | --- |
+| 400 | — | No `Idempotency-Key`, input too long, a missing draft, or an invalid `test_id` (`INVALID_TEST`) |
+| 402 | `INSUFFICIENT_BALANCE` | Body includes `balance` and `cost` |
+| 403 | — | Not a player |
+| 409 | `ROUND_NOT_ACTIVE` / `ALREADY_SUBMITTED` | Not the active round, past the deadline, or after your final submission |
+| 409 | `IN_PROGRESS` | The same key is still being served |
+| 502 / 504 | `error: "HELPER_FAILED"` | The AI failed or timed out; `refunded: true` with `remaining_balance` |
+| 503 | `AI_UNAVAILABLE` | AI is disabled |
+
+- **Charging:** one short transaction checks the request, inserts a
+  `reserved` `helper_usage` row and takes the points with
+  `UPDATE ... WHERE balance >= cost` (backed by `CHECK (balance >= 0)`). The
+  AI runs after the commit, with no lock held. Delivery is recorded in a
+  transaction before the content is returned; any failure (AI error, timeout,
+  empty output, the round ending, a failed write) refunds instead. A refund
+  only happens from `reserved`, so it happens once. Reservations older than the
+  helper timeout plus 30s are refunded on start and every
+  `HELPER_RECOVERY_INTERVAL`.
+- **Idempotency:** a repeated key returns the first request's outcome
+  (delivered content, or the refunded failure) without charging; while the
+  first is still running it gets `409 IN_PROGRESS`.
+- **Concurrency:** a player's purchases serialize on their balance row;
+  different players' run in parallel (the game row is only share-locked).
+- **Privacy:** the AI sees the round's task and the caller's own draft and
+  test only, the player's text JSON-escaped inside delimiters it cannot close.
+  Helper content is only ever returned to the player who bought it.
+  `remaining_balance` is the balance when the helper was delivered.
+- **Storage:** PostgreSQL, not Redis: the debit and the usage row must commit
+  together, and Redis runs without persistence. Helper use does not affect
+  scoring; every usage row is kept for later rules.
 
 ## AI layer
 
