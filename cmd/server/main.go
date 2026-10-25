@@ -101,10 +101,14 @@ func run(logger *log.Logger) error {
 	gameEngine := service.NewGameEngine(transactor, clock, gameEvents, liveStateService, logger, service.EngineOptions{
 		Random:          service.MathRandom{},
 		ResultsDuration: cfg.ResultsDuration,
+		HelperBalance:   cfg.Helpers.StartingBalance,
 	})
 	defer gameEngine.Close()
-	// Left nil while AI is disabled, so prompt tests answer 503.
-	var promptExecutor service.PromptExecutor
+	// Left nil while AI is disabled, so prompt tests and helpers answer 503.
+	var (
+		promptExecutor service.PromptExecutor
+		helperAI       service.HelperAI
+	)
 	if cfg.AIEnabled {
 		// No client timeout: every AI call is bounded by its role's timeout
 		// through its context, which also covers streamed responses.
@@ -117,11 +121,15 @@ func run(logger *log.Logger) error {
 			return err
 		}
 		gameEngine.SetJudge(service.NewRoundJudge(orchestrator, transactor, gameEngine, gameEvents, clock, service.MathRandom{}, logger, cfg.Judging))
-		promptExecutor = orchestrator
+		promptExecutor, helperAI = orchestrator, orchestrator
 		logger.Printf("ai enabled: executor=%s judge=%s", cfg.AI.Executor.Target, cfg.AI.Judge.Target)
 	} else {
 		logger.Printf("ai disabled (AI_ENABLED is not set): rounds wait in Judging and prompt tests are refused")
 	}
+	helperService := service.NewHelperService(transactor, helperAI, clock, logger, cfg.Helpers)
+	gameEngine.OnRoundEnd(helperService.RoundEnded)
+	helperService.StartRecovery()
+	defer helperService.Close()
 	promptTestService := service.NewPromptTestService(transactor, promptExecutor, hub, clock, logger, cfg.PromptTests)
 	defer promptTestService.Close()
 	if err := promptTestService.Recover(ctx); err != nil {
@@ -142,7 +150,7 @@ func run(logger *log.Logger) error {
 		{Name: "postgres", Critical: true, Check: pool.Ping},
 		{Name: "redis", Check: func(ctx context.Context) error { return redisClient.Ping(ctx).Err() }},
 	}
-	server := api.NewServer(authService, challengeService, gameService, liveStateService, promptTestService, roundService, websocketHandler, healthChecks, logger, cfg.JWTSecret)
+	server := api.NewServer(authService, challengeService, gameService, liveStateService, promptTestService, roundService, helperService, websocketHandler, healthChecks, logger, cfg.JWTSecret)
 
 	s := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),
