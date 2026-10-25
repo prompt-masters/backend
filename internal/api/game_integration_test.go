@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prompt-masters/backend/internal/ai"
 	"github.com/prompt-masters/backend/internal/ai/aitest"
 	"github.com/prompt-masters/backend/internal/api"
@@ -49,6 +50,9 @@ type testAPI struct {
 	hub  *ws.Hub
 	// promptAI plays every prompt test; it streams "Hel", "lo".
 	promptAI *aitest.Client
+	// helperAI answers the helpers; it can be made to fail.
+	helperAI *failingAI
+	pool     *pgxpool.Pool
 }
 
 // newTestAPI builds the API without live state: lobby changes are not
@@ -158,7 +162,8 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 	roundService := service.NewRoundService(transactor, engine)
 	websocketHandler := handler.NewWebSocketHandler(hub, live, jwtSecret, []string{"https://app.example.com"}, logger)
 
-	helpers := service.NewHelperService(transactor, orchestrator, service.SystemClock{}, logger, config.HelperConfig{
+	helperAI := &failingAI{next: orchestrator}
+	helpers := service.NewHelperService(transactor, helperAI, service.SystemClock{}, logger, config.HelperConfig{
 		StartingBalance:  100,
 		Costs:            map[domain.HelperType]int{domain.HelperHint: 10, domain.HelperSuggestion: 10, domain.HelperReview: 15},
 		Timeout:          5 * time.Second,
@@ -175,7 +180,7 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 
 	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, promptTests, roundService, helpers, websocketHandler, nil, logger, jwtSecret).Routes())
 	t.Cleanup(server.Close)
-	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs, hub: hub, promptAI: promptAI}
+	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs, hub: hub, promptAI: promptAI, helperAI: helperAI, pool: pool}
 }
 
 // testHubConfig keeps deadlines generous: test clients idle between
