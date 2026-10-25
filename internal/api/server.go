@@ -6,6 +6,7 @@ import (
 
 	"github.com/prompt-masters/backend/internal/api/handler"
 	"github.com/prompt-masters/backend/internal/api/middleware"
+	"github.com/prompt-masters/backend/internal/domain"
 	"github.com/prompt-masters/backend/internal/service"
 )
 
@@ -17,6 +18,7 @@ type Server struct {
 	liveState  *handler.LiveStateHandler
 	tests      *handler.PromptTestHandler
 	rounds     *handler.RoundHandler
+	helpers    *handler.HelperHandler
 	websocket  *handler.WebSocketHandler
 	logger     *log.Logger
 	jwtSecret  string
@@ -29,6 +31,7 @@ func NewServer(
 	liveStateService *service.LiveStateService,
 	promptTestService *service.PromptTestService,
 	roundService *service.RoundService,
+	helperService *service.HelperService,
 	websocketHandler *handler.WebSocketHandler,
 	healthChecks []handler.HealthCheck,
 	logger *log.Logger,
@@ -42,6 +45,7 @@ func NewServer(
 		liveState:  handler.NewLiveStateHandler(liveStateService, logger),
 		tests:      handler.NewPromptTestHandler(promptTestService, logger),
 		rounds:     handler.NewRoundHandler(roundService, logger),
+		helpers:    handler.NewHelperHandler(helperService, logger),
 		websocket:  websocketHandler,
 		logger:     logger,
 		jwtSecret:  jwtSecret,
@@ -91,6 +95,10 @@ func (s *Server) Routes() http.Handler {
 	protected("POST", "/api/v1/rounds/{id}/judge/retry", s.rounds.RetryJudging)
 	protected("GET", "/api/v1/submissions/{id}", s.rounds.GetSubmission)
 	protected("GET", "/api/v1/submissions/{id}/score", s.rounds.GetScore)
+	protected("GET", "/api/v1/rounds/{id}/helpers", s.helpers.Overview)
+	protected("POST", "/api/v1/rounds/{id}/helpers/hint", s.helpers.Use(domain.HelperHint))
+	protected("POST", "/api/v1/rounds/{id}/helpers/suggestion", s.helpers.Use(domain.HelperSuggestion))
+	protected("POST", "/api/v1/rounds/{id}/helpers/review", s.helpers.Use(domain.HelperReview))
 
 	return mux
 }

@@ -33,4 +33,6 @@ var (
 	ErrInvalidTest              = errors.New("not one of your completed tests in this round")
 	ErrResultsNotReady          = errors.New("round results are not published yet")
 	ErrJudgingNotFailed         = errors.New("round judging has not failed")
+	ErrInsufficientBalance      = errors.New("not enough helper points")
+	ErrHelperInProgress         = errors.New("this helper request is still running")
 )

@@ -15,6 +15,29 @@ const liveStateRetryAfterSeconds = "5"
 // WriteDomainError maps a service or domain error onto the matching HTTP
 // response, logging unexpected errors before answering with a 500.
 func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
+	var (
+		balanceErr *service.InsufficientBalanceError
+		helperErr  *service.HelperFailedError
+	)
+	switch {
+	case errors.As(err, &balanceErr):
+		WriteJSON(w, http.StatusPaymentRequired, Envelope{
+			"error": "Not enough helper points.", "error_code": "INSUFFICIENT_BALANCE",
+			"remaining_balance": balanceErr.Balance, "cost": balanceErr.Cost,
+		})
+		return
+	case errors.As(err, &helperErr):
+		// The helper was not delivered and its points were given back.
+		status := http.StatusBadGateway
+		if helperErr.Code == service.HelperErrorTimeout {
+			status = http.StatusGatewayTimeout
+		}
+		WriteJSON(w, status, Envelope{
+			"error": "HELPER_FAILED", "error_code": helperErr.Code, "refunded": true, "remaining_balance": helperErr.Balance,
+		})
+		return
+	}
+
 	var vErr *service.ValidationError
 	if errors.As(err, &vErr) {
 		WriteJSON(w, http.StatusBadRequest, Envelope{
@@ -67,6 +90,8 @@ func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 		WriteErrorCode(w, http.StatusBadRequest, "INVALID_TEST", "Submit one of your completed tests from this round.")
 	case errors.Is(err, domain.ErrResultsNotReady):
 		WriteErrorCode(w, http.StatusConflict, "RESULTS_NOT_READY", "This round's results are not published yet.")
+	case errors.Is(err, domain.ErrHelperInProgress):
+		WriteErrorCode(w, http.StatusConflict, "IN_PROGRESS", "This helper request is still running; retry shortly.")
 	case errors.Is(err, domain.ErrJudgingNotFailed):
 		WriteErrorCode(w, http.StatusConflict, "JUDGING_NOT_FAILED", "This round's judging has not failed.")
 	case errors.Is(err, domain.ErrStateNotFound):

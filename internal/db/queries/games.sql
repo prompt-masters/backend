@@ -115,3 +115,8 @@ ORDER BY number;
 
 -- name: GetGameRound :one
 SELECT * FROM game_rounds WHERE id = $1;
+
+-- name: LockGameShared :one
+-- A shared lock: it waits for, and holds off, engine transitions (which lock
+-- FOR UPDATE), while other shared lockers proceed in parallel.
+SELECT id FROM games WHERE id = $1 FOR SHARE;

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prompt-masters/backend/internal/ai"
 	"github.com/prompt-masters/backend/internal/ai/aitest"
 	"github.com/prompt-masters/backend/internal/api"
@@ -49,6 +50,9 @@ type testAPI struct {
 	hub  *ws.Hub
 	// promptAI plays every prompt test; it streams "Hel", "lo".
 	promptAI *aitest.Client
+	// helperAI answers the helpers; it can be made to fail.
+	helperAI *failingAI
+	pool     *pgxpool.Pool
 }
 
 // newTestAPI builds the API without live state: lobby changes are not
@@ -127,7 +131,9 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 	}
 	promptAI := aitest.New("fake", aitest.Step{
 		Chunks:   []string{"Hel", "lo"},
-		Response: ai.Response{Usage: ai.Usage{InputTokens: 12, OutputTokens: 34}},
+		Response: ai.Response{Text: "Hello", Usage: ai.Usage{InputTokens: 12, OutputTokens: 34}},
+		// Long enough for concurrent requests to overlap.
+		Delay: 20 * time.Millisecond,
 	})
 	fake := ai.Target{Provider: "fake", Model: "fake-model"}
 	orchestrator, err := ai.NewOrchestrator(ai.Config{
@@ -145,7 +151,7 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 	}
 
 	engine := service.NewGameEngine(transactor, service.SystemClock{}, events, syncer, logger,
-		service.EngineOptions{Random: service.MathRandom{}, ResultsDuration: time.Second})
+		service.EngineOptions{Random: service.MathRandom{}, ResultsDuration: time.Second, HelperBalance: 100})
 	t.Cleanup(engine.Close)
 	engine.SetJudge(service.NewRoundJudge(orchestrator, transactor, engine, events, service.SystemClock{}, service.MathRandom{}, logger,
 		config.JudgingConfig{MaxRuns: 2, RetryDelay: 10 * time.Millisecond, StaleAfter: time.Minute, Weights: domain.DefaultScoreWeights}))
@@ -156,13 +162,25 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 	roundService := service.NewRoundService(transactor, engine)
 	websocketHandler := handler.NewWebSocketHandler(hub, live, jwtSecret, []string{"https://app.example.com"}, logger)
 
+	helperAI := &failingAI{next: orchestrator}
+	helpers := service.NewHelperService(transactor, helperAI, service.SystemClock{}, logger, config.HelperConfig{
+		StartingBalance:  100,
+		Costs:            map[domain.HelperType]int{domain.HelperHint: 10, domain.HelperSuggestion: 10, domain.HelperReview: 15},
+		Timeout:          5 * time.Second,
+		MaxInputBytes:    1000,
+		MaxOutputChars:   500,
+		RecoveryInterval: time.Hour,
+		Templates:        config.DefaultHelperTemplates,
+	})
+	t.Cleanup(helpers.Close)
+	engine.OnRoundEnd(helpers.RoundEnded)
 	promptTests := service.NewPromptTestService(transactor, orchestrator, hub, service.SystemClock{}, logger,
 		config.PromptTestConfig{MaxPromptBytes: 1000, MaxConcurrent: 1, StaleAfter: 5 * time.Minute})
 	t.Cleanup(promptTests.Close)
 
-	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, promptTests, roundService, websocketHandler, nil, logger, jwtSecret).Routes())
+	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, promptTests, roundService, helpers, websocketHandler, nil, logger, jwtSecret).Routes())
 	t.Cleanup(server.Close)
-	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs, hub: hub, promptAI: promptAI}
+	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs, hub: hub, promptAI: promptAI, helperAI: helperAI, pool: pool}
 }
 
 // testHubConfig keeps deadlines generous: test clients idle between

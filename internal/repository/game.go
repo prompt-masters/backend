@@ -19,6 +19,9 @@ type GameRepository interface {
 	// LockByID is GetByID that also row-locks the game until the surrounding
 	// transaction ends, serializing every state and membership change.
 	LockByID(ctx context.Context, id uuid.UUID) (*domain.Game, error)
+	// LockSharedByID is GetByID under a shared lock: no state change can
+	// happen until the transaction ends, yet other shared readers proceed.
+	LockSharedByID(ctx context.Context, id uuid.UUID) (*domain.Game, error)
 	GetActiveIDByRoomCode(ctx context.Context, roomCode string) (uuid.UUID, error)
 	// ListByStatus returns games newest first, with settings and player
 	// counts but without players.
