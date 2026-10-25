@@ -133,6 +133,9 @@ make down && docker volume rm backend_postgres_data && make up
 | `make run` | Build and run server locally |
 | `make fmt` | Format Go code |
 | `make test` | Run tests |
+| `make lint` | gofmt check, `go vet`, `sqlc diff` (as CI does) |
+| `make test-unit` | Unit tests with `-race`; database and Redis tests skip |
+| `make test-integration` | Every test against `TEST_DATABASE_URL` and `TEST_REDIS_ADDR`; fails if any of them skips |
 | `make migrate-up` | Apply all migrations |
 | `make migrate-down` | Rollback last migration |
 | `make seed` | Load dev challenge data (idempotent, safe to re-run) |
@@ -182,6 +185,44 @@ Run with the race detector to cover the concurrency tests properly:
 ```sh
 go test -race ./...
 ```
+
+## CI/CD
+
+`.github/workflows/backend.yml` (GitHub Actions). Each job runs only if the
+one before it passed.
+
+| Trigger | Jobs |
+| --- | --- |
+| Pull request into `develop` or `main` | `lint` → `unit` → `integration` (PostgreSQL 16 and Redis 7 service containers) → `build` (`go build` and `docker build`) |
+| Push to `main` (a merge) | `image` (push to `ghcr.io/prompt-masters/backend:<sha>`) → `deploy` → `migrate` → `health-check`, and `rollback` if a step after the deploy fails |
+
+**Required checks.** In *Settings → Branches* (or a ruleset), protect
+`develop` and `main`: *Require a pull request before merging*, *Require
+status checks to pass* with `lint`, `unit`, `integration` and `build`, and
+*Require branches to be up to date before merging*.
+
+**Deploy configuration.** No deploy target is configured yet, so `deploy`,
+`migrate`, `health-check` and `rollback` are skipped until the repository
+variable `DEPLOY_ENABLED` is `true`. They run in the `production`
+environment and need:
+
+| Name | Kind | Used for |
+| --- | --- | --- |
+| `DEPLOY_ENABLED` | variable | `true` turns the deploy jobs on |
+| `HEALTHCHECK_URL` | variable | The deployed `/health`, e.g. `https://api.example.com/health` |
+| `DEPLOY_WEBHOOK_URL` | secret | Deploy hook that pulls and runs the image given as `{"image": "..."}` |
+| `DEPLOY_WEBHOOK_TOKEN` | secret | Bearer token for that hook |
+| `PRODUCTION_DATABASE_URL` | secret | Database `goose up` migrates; reachable from GitHub runners |
+
+**Order and safety.** Migrations run *after* the deploy, so the new code
+briefly runs against the previous schema, and after a rollback the previous
+code runs against the new one. Every migration must therefore be backward
+compatible: add tables, nullable or defaulted columns and indexes; never
+drop, rename or tighten in the same release (split those into a later
+release, once no running code needs the old shape). `health-check` polls
+`/health` (503 while PostgreSQL is unreachable) with backoff
+(`scripts/healthcheck.sh`); if it or `migrate` fails, `rollback` redeploys
+the previous commit's image. Migrations are not rolled back automatically.
 
 ## API
 
