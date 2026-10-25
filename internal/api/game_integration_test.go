@@ -4,16 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prompt-masters/backend/internal/ai"
+	"github.com/prompt-masters/backend/internal/ai/aitest"
 	"github.com/prompt-masters/backend/internal/api"
 	"github.com/prompt-masters/backend/internal/api/handler"
 	"github.com/prompt-masters/backend/internal/config"
@@ -42,6 +48,11 @@ type testAPI struct {
 	live *service.LiveStateService
 	logs *syncBuffer
 	hub  *ws.Hub
+	// promptAI plays every prompt test; it streams "Hel", "lo".
+	promptAI *aitest.Client
+	// helperAI answers the helpers; it can be made to fail.
+	helperAI *failingAI
+	pool     *pgxpool.Pool
 }
 
 // newTestAPI builds the API without live state: lobby changes are not
@@ -104,6 +115,7 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 		live   *service.LiveStateService
 		syncer service.LiveStateSyncer = noopSyncer{}
 	)
+	events := service.NewGameEvents(hub, logger, time.Now)
 	if redisClient != nil {
 		store, err := redisstore.New(redisClient, redisstore.Options{
 			KeyPrefix: keyPrefix,
@@ -116,14 +128,59 @@ func buildTestAPI(t *testing.T, redisClient redis.UniversalClient, keyPrefix str
 		}
 		live = service.NewLiveStateService(store, transactor, logger, time.Now)
 		syncer = live
-		hub.SetRouter(service.NewWSRouter(live, hub, logger))
 	}
-	gameService := service.NewGameService(transactor, service.MathRandom{}, syncer, service.NewGameEvents(hub, logger))
+	promptAI := aitest.New("fake", aitest.Step{
+		Chunks:   []string{"Hel", "lo"},
+		Response: ai.Response{Text: "Hello", Usage: ai.Usage{InputTokens: 12, OutputTokens: 34}},
+		// Long enough for concurrent requests to overlap.
+		Delay: 20 * time.Millisecond,
+	})
+	fake := ai.Target{Provider: "fake", Model: "fake-model"}
+	orchestrator, err := ai.NewOrchestrator(ai.Config{
+		Executor: ai.RoleConfig{Target: fake, Timeout: 10 * time.Second, MaxTokens: 100},
+		Judge:    ai.RoleConfig{Target: ai.Target{Provider: "fakejudge", Model: "judge-model"}, Timeout: 10 * time.Second, MaxTokens: 100},
+		ExecutorModels: map[string]ai.Target{
+			string(domain.AIModelClaudeOpus5): fake, string(domain.AIModelClaudeSonnet5): fake, string(domain.AIModelClaudeHaiku4_5): fake,
+		},
+		Retry:             ai.RetryConfig{MaxAttempts: 1, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+		Providers:         map[string]ai.ProviderSettings{"fake": {APIKey: ai.NewAPIKey("sk-test")}, "fakejudge": {APIKey: ai.NewAPIKey("sk-test")}},
+		JudgeParseRetries: 1,
+	}, map[string]ai.AIClient{"fake": promptAI, "fakejudge": labelJudge{}}, logger)
+	if err != nil {
+		t.Fatalf("creating orchestrator: %v", err)
+	}
+
+	engine := service.NewGameEngine(transactor, service.SystemClock{}, events, syncer, logger,
+		service.EngineOptions{Random: service.MathRandom{}, ResultsDuration: time.Second, HelperBalance: 100})
+	t.Cleanup(engine.Close)
+	engine.SetJudge(service.NewRoundJudge(orchestrator, transactor, engine, events, service.SystemClock{}, service.MathRandom{}, logger,
+		config.JudgingConfig{MaxRuns: 2, RetryDelay: 10 * time.Millisecond, StaleAfter: time.Minute, Weights: domain.DefaultScoreWeights}))
+	if live != nil {
+		hub.SetRouter(service.NewWSRouter(live, engine, hub, logger))
+	}
+	gameService := service.NewGameService(transactor, service.MathRandom{}, syncer, events, engine)
+	roundService := service.NewRoundService(transactor, engine)
 	websocketHandler := handler.NewWebSocketHandler(hub, live, jwtSecret, []string{"https://app.example.com"}, logger)
 
-	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, websocketHandler, nil, logger, jwtSecret).Routes())
+	helperAI := &failingAI{next: orchestrator}
+	helpers := service.NewHelperService(transactor, helperAI, service.SystemClock{}, logger, config.HelperConfig{
+		StartingBalance:  100,
+		Costs:            map[domain.HelperType]int{domain.HelperHint: 10, domain.HelperSuggestion: 10, domain.HelperReview: 15},
+		Timeout:          5 * time.Second,
+		MaxInputBytes:    1000,
+		MaxOutputChars:   500,
+		RecoveryInterval: time.Hour,
+		Templates:        config.DefaultHelperTemplates,
+	})
+	t.Cleanup(helpers.Close)
+	engine.OnRoundEnd(helpers.RoundEnded)
+	promptTests := service.NewPromptTestService(transactor, orchestrator, hub, service.SystemClock{}, logger,
+		config.PromptTestConfig{MaxPromptBytes: 1000, MaxConcurrent: 1, StaleAfter: 5 * time.Minute})
+	t.Cleanup(promptTests.Close)
+
+	server := httptest.NewServer(api.NewServer(authService, challengeService, gameService, live, promptTests, roundService, helpers, websocketHandler, nil, logger, jwtSecret).Routes())
 	t.Cleanup(server.Close)
-	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs, hub: hub}
+	return &testAPI{t: t, server: server, users: userRepo, live: live, logs: logs, hub: hub, promptAI: promptAI, helperAI: helperAI, pool: pool}
 }
 
 // testHubConfig keeps deadlines generous: test clients idle between
@@ -713,3 +770,28 @@ func ptr[T any](v T) *T { return &v }
 type noopSyncer struct{}
 
 func (noopSyncer) SyncGame(context.Context, *domain.Game) {}
+
+var candidateRE = regexp.MustCompile(`<candidate id="([A-Z]+)">\n(.*)\n</candidate>`)
+
+// labelJudge plays the judge: it scores each anonymous candidate from its
+// prompt alone, rating prompts that mention "best" highest.
+type labelJudge struct{}
+
+func (labelJudge) Generate(_ context.Context, req ai.Request) (ai.Response, error) {
+	var results []string
+	for _, m := range candidateRE.FindAllStringSubmatch(req.Messages[0].Content, -1) {
+		var c struct{ Prompt string }
+		_ = json.Unmarshal([]byte(m[2]), &c)
+		score := 5
+		if strings.Contains(c.Prompt, "best") {
+			score = 9
+		}
+		results = append(results, fmt.Sprintf(`{"candidate_id":%q,"scores":{"accuracy":%d,"simplicity":%d,"creativity":%d,"adherence":%d},"feedback":"candidate %s"}`,
+			m[1], score, score, score, score, m[1]))
+	}
+	return ai.Response{Text: `{"results":[` + strings.Join(results, ",") + `]}`, Model: req.Model}, nil
+}
+
+func (labelJudge) Stream(context.Context, ai.Request) (<-chan ai.StreamEvent, error) {
+	return nil, errors.New("not used")
+}

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prompt-masters/backend/internal/ai"
+	"github.com/prompt-masters/backend/internal/ai/providers"
 	"github.com/prompt-masters/backend/internal/api"
 	"github.com/prompt-masters/backend/internal/api/handler"
 	"github.com/prompt-masters/backend/internal/config"
@@ -88,24 +90,67 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	liveStateService := service.NewLiveStateService(gameStateStore, transactor, logger, time.Now)
+	clock := service.SystemClock{}
+	liveStateService := service.NewLiveStateService(gameStateStore, transactor, logger, clock.Now)
 
 	hub, err := ws.NewHub(cfg.WS.Hub, nil, logger)
 	if err != nil {
 		return err
 	}
+	gameEvents := service.NewGameEvents(hub, logger, clock.Now)
+	gameEngine := service.NewGameEngine(transactor, clock, gameEvents, liveStateService, logger, service.EngineOptions{
+		Random:          service.MathRandom{},
+		ResultsDuration: cfg.ResultsDuration,
+		HelperBalance:   cfg.Helpers.StartingBalance,
+	})
+	defer gameEngine.Close()
+	// Left nil while AI is disabled, so prompt tests and helpers answer 503.
+	var (
+		promptExecutor service.PromptExecutor
+		helperAI       service.HelperAI
+	)
+	if cfg.AIEnabled {
+		// No client timeout: every AI call is bounded by its role's timeout
+		// through its context, which also covers streamed responses.
+		aiClients, err := providers.Registry().Clients(cfg.AI, &http.Client{})
+		if err != nil {
+			return err
+		}
+		orchestrator, err := ai.NewOrchestrator(cfg.AI, aiClients, logger)
+		if err != nil {
+			return err
+		}
+		gameEngine.SetJudge(service.NewRoundJudge(orchestrator, transactor, gameEngine, gameEvents, clock, service.MathRandom{}, logger, cfg.Judging))
+		promptExecutor, helperAI = orchestrator, orchestrator
+		logger.Printf("ai enabled: executor=%s judge=%s", cfg.AI.Executor.Target, cfg.AI.Judge.Target)
+	} else {
+		logger.Printf("ai disabled (AI_ENABLED is not set): rounds wait in Judging and prompt tests are refused")
+	}
+	helperService := service.NewHelperService(transactor, helperAI, clock, logger, cfg.Helpers)
+	gameEngine.OnRoundEnd(helperService.RoundEnded)
+	helperService.StartRecovery()
+	defer helperService.Close()
+	promptTestService := service.NewPromptTestService(transactor, promptExecutor, hub, clock, logger, cfg.PromptTests)
+	defer promptTestService.Close()
+	if err := promptTestService.Recover(ctx); err != nil {
+		return err
+	}
+	// Resume the rounds that were in play before the server stopped.
+	if err := gameEngine.Recover(ctx); err != nil {
+		return err
+	}
 	// The router needs the hub to broadcast, and the hub needs the router to
 	// deliver client messages, so it is attached once both exist.
-	hub.SetRouter(service.NewWSRouter(liveStateService, hub, logger))
-	gameEvents := service.NewGameEvents(hub, logger)
-	gameService := service.NewGameService(transactor, service.MathRandom{}, liveStateService, gameEvents)
+	hub.SetRouter(service.NewWSRouter(liveStateService, gameEngine, hub, logger))
+	gameService := service.NewGameService(transactor, service.MathRandom{}, liveStateService, gameEvents, gameEngine)
+	roundService := service.NewRoundService(transactor, gameEngine)
 	websocketHandler := handler.NewWebSocketHandler(hub, liveStateService, cfg.JWTSecret, cfg.WS.AllowedOrigins, logger)
 
 	healthChecks := []handler.HealthCheck{
 		{Name: "postgres", Critical: true, Check: pool.Ping},
 		{Name: "redis", Check: func(ctx context.Context) error { return redisClient.Ping(ctx).Err() }},
 	}
-	server := api.NewServer(authService, challengeService, gameService, liveStateService, websocketHandler, healthChecks, logger, cfg.JWTSecret)
+	server := api.NewServer(authService, challengeService, gameService, liveStateService, promptTestService, roundService, helperService, websocketHandler, healthChecks, logger, cfg.JWTSecret)
 
 	s := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),

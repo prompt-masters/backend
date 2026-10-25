@@ -4,8 +4,12 @@ import "context"
 
 // TxRepositories are repositories bound to one database transaction.
 type TxRepositories struct {
-	Games      GameRepository
-	Challenges ChallengeRepository
+	Games       GameRepository
+	Challenges  ChallengeRepository
+	Submissions SubmissionRepository
+	PromptTests PromptTestRepository
+	Judging     JudgingRepository
+	Helpers     HelperRepository
 }
 
 // Transactor runs fn in a single database transaction, handing it repositories

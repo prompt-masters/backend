@@ -349,6 +349,32 @@ func TestLiveStateGetLiveStateFromRedis(t *testing.T) {
 	}
 }
 
+// TestLiveStateGetLiveStateCarriesTheStoredRound pins the refresh guarantee:
+// a reconnect is answered with the round deadline stored in PostgreSQL, from
+// Redis or rebuilt alike, never with a new one.
+func TestLiveStateGetLiveStateCarriesTheStoredRound(t *testing.T) {
+	ctx := context.Background()
+	for _, inRedis := range []bool{true, false} {
+		f := newLiveFixture(t, domain.GameStatusInProgress, inRedis)
+		stored := domain.GameProgress{
+			Phase: domain.GamePhaseRoundActive, CurrentRound: 2, RoundID: uuid.New(),
+			RoundStartedAt: liveNow.Add(-30 * time.Second), RoundDeadline: liveNow.Add(60 * time.Second),
+		}
+		f.games.mu.Lock()
+		f.games.games[f.game.ID].Progress = stored
+		f.games.mu.Unlock()
+		stored.TotalRounds = validSettings.Rounds
+
+		got, err := f.svc.GetLiveState(ctx, f.guest, f.gameID)
+		if err != nil {
+			t.Fatalf("inRedis=%v: GetLiveState() error = %v", inRedis, err)
+		}
+		if got.Progress != stored || !got.ServerTime.Equal(liveNow) {
+			t.Errorf("inRedis=%v: progress = %+v at %v, want %+v at %v", inRedis, got.Progress, got.ServerTime, stored, liveNow)
+		}
+	}
+}
+
 func TestLiveStateGetLiveStateAccessControl(t *testing.T) {
 	ctx := context.Background()
 
