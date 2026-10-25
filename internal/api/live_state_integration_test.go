@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prompt-masters/backend/internal/testutil/redistest"
+	"github.com/prompt-masters/backend/internal/ws"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -24,6 +25,13 @@ func newLiveTestAPI(t *testing.T) *liveTestAPI {
 	t.Helper()
 	client, prefix := redistest.Client(t)
 	return &liveTestAPI{testAPI: buildTestAPI(t, client, prefix), redis: client, prefix: prefix}
+}
+
+// newLiveTestAPIWithHub is newLiveTestAPI with its own hub configuration.
+func newLiveTestAPIWithHub(t *testing.T, hubCfg ws.Config) *liveTestAPI {
+	t.Helper()
+	client, prefix := redistest.Client(t)
+	return &liveTestAPI{testAPI: buildTestAPIWithHub(t, client, prefix, hubCfg), redis: client, prefix: prefix}
 }
 
 type liveJSON struct {

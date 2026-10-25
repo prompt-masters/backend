@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/prompt-masters/backend/internal/domain"
@@ -55,6 +56,7 @@ func (h *recordingHub) types() []ws.Type {
 type routerFixture struct {
 	*liveFixture
 	hub     *recordingHub
+	events  *recordingEvents
 	router  *WSRouter
 	replies []ws.Payload
 }
@@ -63,7 +65,11 @@ func newRouterFixture(t *testing.T, status domain.GameStatus) *routerFixture {
 	t.Helper()
 	live := newLiveFixture(t, status, true)
 	hub := &recordingHub{}
-	return &routerFixture{liveFixture: live, hub: hub, router: NewWSRouter(live.svc, hub, log.New(live.logs, "", 0))}
+	events := &recordingEvents{}
+	logger := log.New(live.logs, "", 0)
+	engine := NewGameEngine(live.games, newFakeClock(liveNow), events, live.svc, logger, EngineOptions{})
+	t.Cleanup(engine.Close)
+	return &routerFixture{liveFixture: live, hub: hub, events: events, router: NewWSRouter(live.svc, engine, hub, logger)}
 }
 
 // route sends one client message as userID and collects any reply.
@@ -183,9 +189,8 @@ func TestWSRouterUnsupportedAndUnknownEvents(t *testing.T) {
 	f := newRouterFixture(t, domain.GameStatusInProgress)
 
 	tests := map[ws.Type]string{
-		ws.TypeClientPromptTest:   ws.CodeUnsupportedEvent,
-		ws.TypeClientSubmitPrompt: ws.CodeUnsupportedEvent,
-		"who_knows":               ws.CodeUnknownEvent,
+		ws.TypeClientPromptTest: ws.CodeUnsupportedEvent,
+		"who_knows":             ws.CodeUnknownEvent,
 	}
 	for eventType, wantCode := range tests {
 		payload := errorReply(t, f.route(f.guest, eventType, `{"prompt":"secret text"}`))
@@ -196,4 +201,72 @@ func TestWSRouterUnsupportedAndUnknownEvents(t *testing.T) {
 	if got := f.hub.types(); len(got) != 0 {
 		t.Errorf("broadcast %v, want none", got)
 	}
+}
+
+func TestWSRouterSubmitPrompt(t *testing.T) {
+	// activeRound puts the fixture's game in round 1, due in a minute, and
+	// gives the guest a completed test in it.
+	activeRound := func(f *routerFixture) (roundID, testID uuid.UUID) {
+		roundID, testID = uuid.New(), uuid.New()
+		out := "rain on the roof"
+		f.games.mu.Lock()
+		defer f.games.mu.Unlock()
+		f.games.games[f.game.ID].Progress = domain.GameProgress{
+			Phase: domain.GamePhaseRoundActive, CurrentRound: 1, RoundID: roundID,
+			RoundStartedAt: liveNow.Add(-30 * time.Second), RoundDeadline: liveNow.Add(time.Minute),
+		}
+		f.games.promptTests[testID] = &domain.PromptTest{
+			ID: testID, GameID: f.game.ID, RoundID: roundID, PlayerID: f.guest, TestNumber: 1,
+			Prompt: "haiku please", Output: &out, Status: domain.PromptTestCompleted,
+		}
+		return roundID, testID
+	}
+	payload := func(roundID, testID uuid.UUID) string {
+		return `{"round_id":"` + roundID.String() + `","test_id":"` + testID.String() + `"}`
+	}
+
+	t.Run("submits the test and announces it by count", func(t *testing.T) {
+		f := newRouterFixture(t, domain.GameStatusInProgress)
+		roundID, testID := activeRound(f)
+
+		if replies := f.route(f.guest, ws.TypeClientSubmitPrompt, payload(roundID, testID)); len(replies) != 0 {
+			t.Fatalf("replies = %+v, want none", replies)
+		}
+		subs, _ := fakeSubmissionRepo{f.games}.ListByRound(context.Background(), roundID)
+		if len(subs) != 1 || subs[0].PlayerID != f.guest || subs[0].Output != "rain on the roof" {
+			t.Errorf("stored submissions = %+v", subs)
+		}
+		if events := f.events.events(); len(events) != 1 || events[0].kind != "player_submitted" || events[0].submitted != 1 || events[0].total != 2 {
+			t.Errorf("published %+v, want player_submitted 1/2", events)
+		}
+	})
+
+	t.Run("refusals answer the sender", func(t *testing.T) {
+		f := newRouterFixture(t, domain.GameStatusInProgress)
+		roundID, testID := activeRound(f)
+		tests := []struct {
+			name     string
+			sender   uuid.UUID
+			payload  string
+			wantCode string
+		}{
+			{name: "not an object", sender: f.guest, payload: `"hi"`, wantCode: ws.CodeInvalidPayload},
+			{name: "malformed round_id", sender: f.guest, payload: `{"round_id":"nope","test_id":"` + testID.String() + `"}`, wantCode: ws.CodeInvalidPayload},
+			{name: "malformed test_id", sender: f.guest, payload: `{"round_id":"` + roundID.String() + `","test_id":"nope"}`, wantCode: ws.CodeInvalidPayload},
+			{name: "another player's test", sender: f.host, payload: payload(roundID, testID), wantCode: ws.CodeInvalidPayload},
+			{name: "another round", sender: f.guest, payload: payload(uuid.New(), testID), wantCode: ws.CodeNotAllowed},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				p := errorReply(t, f.route(tt.sender, ws.TypeClientSubmitPrompt, tt.payload))
+				if p.Code != tt.wantCode {
+					t.Errorf("error = %+v, want code %q", p, tt.wantCode)
+				}
+			})
+		}
+		subs, _ := fakeSubmissionRepo{f.games}.ListByRound(context.Background(), roundID)
+		if len(subs) != 0 {
+			t.Errorf("stored %d submissions, want none", len(subs))
+		}
+	})
 }

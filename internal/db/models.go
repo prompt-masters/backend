@@ -22,19 +22,34 @@ type Challenge struct {
 }
 
 type Game struct {
-	ID        pgtype.UUID
-	RoomCode  string
-	HostID    pgtype.UUID
-	Status    string
-	CreatedAt pgtype.Timestamptz
-	UpdatedAt pgtype.Timestamptz
-	StartedAt pgtype.Timestamptz
+	ID               pgtype.UUID
+	RoomCode         string
+	HostID           pgtype.UUID
+	Status           string
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+	StartedAt        pgtype.Timestamptz
+	Phase            string
+	CurrentRound     int16
+	RoundID          pgtype.UUID
+	RoundStartedAtMs pgtype.Int8
+	RoundDeadlineMs  pgtype.Int8
+	RoundChallengeID pgtype.UUID
 }
 
 type GamePlayer struct {
 	GameID   pgtype.UUID
 	UserID   pgtype.UUID
 	JoinedAt pgtype.Timestamptz
+}
+
+type GameRound struct {
+	ID          pgtype.UUID
+	GameID      pgtype.UUID
+	Number      int16
+	StartedAtMs int64
+	DeadlineMs  int64
+	ChallengeID pgtype.UUID
 }
 
 type GameSetting struct {
@@ -48,12 +63,114 @@ type GameSetting struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+type HelperBalance struct {
+	GameID      pgtype.UUID
+	PlayerID    pgtype.UUID
+	Balance     int32
+	UpdatedAtMs int64
+}
+
+type HelperUsage struct {
+	ID             pgtype.UUID
+	GameID         pgtype.UUID
+	RoundID        pgtype.UUID
+	PlayerID       pgtype.UUID
+	HelperType     string
+	Cost           int32
+	Status         string
+	IdempotencyKey string
+	InputPrompt    pgtype.Text
+	TestID         pgtype.UUID
+	Content        pgtype.Text
+	ErrorCode      pgtype.Text
+	Provider       pgtype.Text
+	Model          pgtype.Text
+	InputTokens    pgtype.Int4
+	OutputTokens   pgtype.Int4
+	CostUsd        pgtype.Float8
+	CreatedAtMs    int64
+	DeliveredAtMs  pgtype.Int8
+	RefundedAtMs   pgtype.Int8
+}
+
+type JudgingRun struct {
+	RoundID      pgtype.UUID
+	GameID       pgtype.UUID
+	Status       string
+	Attempt      int32
+	StartedAtMs  int64
+	FinishedAtMs pgtype.Int8
+	ErrorCode    pgtype.Text
+	Provider     pgtype.Text
+	Model        pgtype.Text
+	InputTokens  pgtype.Int4
+	OutputTokens pgtype.Int4
+	CostUsd      pgtype.Float8
+}
+
+type PromptTest struct {
+	ID            pgtype.UUID
+	GameID        pgtype.UUID
+	RoundID       pgtype.UUID
+	PlayerID      pgtype.UUID
+	TestNumber    int32
+	Prompt        string
+	Output        pgtype.Text
+	Status        string
+	ErrorCode     pgtype.Text
+	Provider      pgtype.Text
+	Model         pgtype.Text
+	InputTokens   pgtype.Int4
+	OutputTokens  pgtype.Int4
+	CostUsd       pgtype.Float8
+	LatencyMs     pgtype.Int8
+	CreatedAtMs   int64
+	StartedAtMs   pgtype.Int8
+	CompletedAtMs pgtype.Int8
+}
+
 type RefreshToken struct {
 	TokenHash string
 	UserID    pgtype.UUID
 	ExpiresAt pgtype.Timestamptz
 	RevokedAt pgtype.Timestamptz
 	CreatedAt pgtype.Timestamptz
+}
+
+type Score struct {
+	ID           pgtype.UUID
+	GameID       pgtype.UUID
+	RoundID      pgtype.UUID
+	PlayerID     pgtype.UUID
+	SubmissionID pgtype.UUID
+	NoSubmission bool
+	Label        pgtype.Text
+	Accuracy     int32
+	Simplicity   int32
+	Creativity   int32
+	Adherence    int32
+	Efficiency   int32
+	Total        int32
+	Rank         int32
+	Rationale    pgtype.Text
+	Provider     pgtype.Text
+	Model        pgtype.Text
+	CreatedAtMs  int64
+}
+
+type Submission struct {
+	ID            pgtype.UUID
+	GameID        pgtype.UUID
+	RoundID       pgtype.UUID
+	PlayerID      pgtype.UUID
+	TestID        pgtype.UUID
+	Prompt        string
+	Output        string
+	PromptLength  int32
+	TestCount     int32
+	Source        string
+	SubmittedAtMs int64
+	LockedAtMs    int64
 }
 
 type User struct {

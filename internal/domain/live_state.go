@@ -61,4 +61,11 @@ type LiveGameState struct {
 	// Rebuilt reports that Redis held no state and it was reconstructed from
 	// PostgreSQL.
 	Rebuilt bool
+	// Progress is the game engine's state, read from PostgreSQL, and
+	// ServerTime the moment the snapshot was taken.
+	Progress   GameProgress
+	ServerTime time.Time
+	// Results are the last round's published results, set while the game
+	// shows Results or is over.
+	Results *RoundResults
 }

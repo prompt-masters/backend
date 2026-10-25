@@ -12,35 +12,94 @@ import (
 
 type Querier interface {
 	AddGamePlayer(ctx context.Context, arg AddGamePlayerParams) error
+	// Only the worker holding this attempt may complete it.
+	CompleteJudgingRun(ctx context.Context, arg CompleteJudgingRunParams) (int64, error)
+	// Every attempt counts, whatever its status.
+	CountPromptTests(ctx context.Context, arg CountPromptTestsParams) (int32, error)
+	CountSubmissions(ctx context.Context, roundID pgtype.UUID) (int32, error)
+	CountUnfinishedPromptTests(ctx context.Context, arg CountUnfinishedPromptTestsParams) (int32, error)
 	// Returns no row when the room code is held by another active game.
 	CreateGame(ctx context.Context, arg CreateGameParams) (*Game, error)
+	CreateGameRound(ctx context.Context, arg CreateGameRoundParams) error
 	CreateGameSettings(ctx context.Context, arg CreateGameSettingsParams) error
+	// Returns no row when the player already used this idempotency key.
+	CreateHelperUsage(ctx context.Context, arg CreateHelperUsageParams) (pgtype.UUID, error)
+	CreatePromptTest(ctx context.Context, arg CreatePromptTestParams) (pgtype.UUID, error)
 	CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) error
+	CreateScore(ctx context.Context, arg CreateScoreParams) error
+	// Returns no row when the player already has a submission for the round:
+	// the first one stays, whichever path wrote it.
+	CreateSubmission(ctx context.Context, arg CreateSubmissionParams) (*Submission, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (*User, error)
 	CreateVerificationToken(ctx context.Context, arg CreateVerificationTokenParams) (*VerificationToken, error)
+	CreditHelperBalance(ctx context.Context, arg CreditHelperBalanceParams) (int32, error)
+	// Takes cost only if the balance covers it; returns no row otherwise.
+	DebitHelperBalance(ctx context.Context, arg DebitHelperBalanceParams) (int32, error)
 	DeleteExpiredTokens(ctx context.Context) error
 	DeleteVerificationToken(ctx context.Context, token string) error
+	DeliverHelperUsage(ctx context.Context, arg DeliverHelperUsageParams) (int64, error)
+	EnsureHelperBalance(ctx context.Context, arg EnsureHelperBalanceParams) error
+	FailJudgingRun(ctx context.Context, arg FailJudgingRunParams) (int64, error)
+	// Tests left unfinished by a server that stopped mid-run.
+	FailStalePromptTests(ctx context.Context, arg FailStalePromptTestsParams) (int64, error)
+	FinishPromptTest(ctx context.Context, arg FinishPromptTestParams) (int64, error)
 	GetActiveGameIDByRoomCode(ctx context.Context, roomCode string) (pgtype.UUID, error)
 	GetActiveRefreshTokenUserID(ctx context.Context, tokenHash string) (pgtype.UUID, error)
 	GetChallengeByID(ctx context.Context, id pgtype.UUID) (*Challenge, error)
 	GetGameByID(ctx context.Context, id pgtype.UUID) (*GetGameByIDRow, error)
+	GetGameProgress(ctx context.Context, id pgtype.UUID) (*GetGameProgressRow, error)
+	GetGameRound(ctx context.Context, id pgtype.UUID) (*GameRound, error)
+	GetHelperBalance(ctx context.Context, arg GetHelperBalanceParams) (int32, error)
+	GetHelperUsage(ctx context.Context, id pgtype.UUID) (*HelperUsage, error)
+	GetHelperUsageByKey(ctx context.Context, arg GetHelperUsageByKeyParams) (*HelperUsage, error)
+	GetJudgingRun(ctx context.Context, roundID pgtype.UUID) (*JudgingRun, error)
+	GetPlayerSubmission(ctx context.Context, arg GetPlayerSubmissionParams) (*Submission, error)
+	GetPromptTest(ctx context.Context, id pgtype.UUID) (*PromptTest, error)
+	GetSubmission(ctx context.Context, id pgtype.UUID) (*Submission, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (*User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	GetVerificationToken(ctx context.Context, token string) (*VerificationToken, error)
+	// Claims a round never judged before; returns no row when a run exists.
+	InsertJudgingRun(ctx context.Context, arg InsertJudgingRunParams) (int32, error)
+	LastCompletedPromptTest(ctx context.Context, arg LastCompletedPromptTestParams) (*PromptTest, error)
 	ListChallenges(ctx context.Context, arg ListChallengesParams) ([]*Challenge, error)
+	// The challenges already played in a game, so a new round avoids them.
+	ListGameChallengeIDs(ctx context.Context, gameID pgtype.UUID) ([]pgtype.UUID, error)
 	ListGamePlayers(ctx context.Context, gameID pgtype.UUID) ([]*ListGamePlayersRow, error)
+	ListGamesByPhase(ctx context.Context, phase string) ([]*ListGamesByPhaseRow, error)
 	ListGamesByStatus(ctx context.Context, arg ListGamesByStatusParams) ([]*ListGamesByStatusRow, error)
+	ListHelperUsage(ctx context.Context, arg ListHelperUsageParams) ([]*HelperUsage, error)
+	ListPromptTests(ctx context.Context, arg ListPromptTestsParams) ([]*PromptTest, error)
+	ListScores(ctx context.Context, roundID pgtype.UUID) ([]*Score, error)
+	ListStaleHelperReservations(ctx context.Context, createdAtMs int64) ([]*HelperUsage, error)
+	ListSubmissions(ctx context.Context, roundID pgtype.UUID) ([]*Submission, error)
 	// Row-locks the game so membership and status changes are serialized. Read
 	// the game in a later statement: in READ COMMITTED, anything else computed by
 	// this statement (such as a player count subquery) would use the snapshot from
 	// before the lock wait and miss changes committed by the previous lock holder.
 	LockGameByID(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
+	// A shared lock: it waits for, and holds off, engine transitions (which lock
+	// FOR UPDATE), while other shared lockers proceed in parallel.
+	LockGameShared(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
+	MarkPromptTestStreaming(ctx context.Context, arg MarkPromptTestStreamingParams) (int64, error)
+	// Callers hold the game row lock, which serializes allocation; the unique
+	// constraint is the safety net.
+	NextPromptTestNumber(ctx context.Context, arg NextPromptTestNumberParams) (int32, error)
+	// Claims a failed run, or one whose worker stopped (running since before
+	// stale_before_ms); returns no row otherwise.
+	ReclaimJudgingRun(ctx context.Context, arg ReclaimJudgingRunParams) (int32, error)
+	// Only a reservation can be refunded, so a refund happens at most once.
+	RefundHelperUsage(ctx context.Context, arg RefundHelperUsageParams) (int64, error)
 	RemoveGamePlayer(ctx context.Context, arg RemoveGamePlayerParams) (int64, error)
 	RevokeRefreshToken(ctx context.Context, tokenHash string) error
 	RotateRefreshToken(ctx context.Context, arg RotateRefreshTokenParams) (pgtype.UUID, error)
 	SetEmailVerified(ctx context.Context, id pgtype.UUID) error
 	UpdateGameHost(ctx context.Context, arg UpdateGameHostParams) error
+	// Compare-and-set: applies only while the stored phase, status and round are
+	// still the ones the change was decided from, so a duplicate or stale
+	// transition updates no row, even from another server instance.
+	UpdateGameProgress(ctx context.Context, arg UpdateGameProgressParams) (int64, error)
 	UpdateGameSettings(ctx context.Context, arg UpdateGameSettingsParams) error
 	UpdateGameStatus(ctx context.Context, arg UpdateGameStatusParams) error
 	UpdateUserEmail(ctx context.Context, arg UpdateUserEmailParams) error
