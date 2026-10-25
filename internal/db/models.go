@@ -63,6 +63,36 @@ type GameSetting struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+type HelperBalance struct {
+	GameID      pgtype.UUID
+	PlayerID    pgtype.UUID
+	Balance     int32
+	UpdatedAtMs int64
+}
+
+type HelperUsage struct {
+	ID             pgtype.UUID
+	GameID         pgtype.UUID
+	RoundID        pgtype.UUID
+	PlayerID       pgtype.UUID
+	HelperType     string
+	Cost           int32
+	Status         string
+	IdempotencyKey string
+	InputPrompt    pgtype.Text
+	TestID         pgtype.UUID
+	Content        pgtype.Text
+	ErrorCode      pgtype.Text
+	Provider       pgtype.Text
+	Model          pgtype.Text
+	InputTokens    pgtype.Int4
+	OutputTokens   pgtype.Int4
+	CostUsd        pgtype.Float8
+	CreatedAtMs    int64
+	DeliveredAtMs  pgtype.Int8
+	RefundedAtMs   pgtype.Int8
+}
+
 type JudgingRun struct {
 	RoundID      pgtype.UUID
 	GameID       pgtype.UUID

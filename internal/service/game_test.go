@@ -26,6 +26,10 @@ type fakeGameStore struct {
 	submissions map[uuid.UUID]*domain.Submission // by ID
 	judgingRuns map[uuid.UUID]*domain.JudgingRun // by round ID
 	scores      []domain.Score
+	balances    map[[2]uuid.UUID]int // by game and player
+	helperUsage map[uuid.UUID]*domain.HelperUsage
+	// failDeliver, when set, makes recording a helper delivery fail.
+	failDeliver bool
 	rounds      map[uuid.UUID]domain.Round
 	promptTests map[uuid.UUID]*domain.PromptTest
 	challenges  *fakeChallengeRepository
@@ -42,6 +46,8 @@ func newFakeGameStore() *fakeGameStore {
 		games:       map[uuid.UUID]*domain.Game{},
 		submissions: map[uuid.UUID]*domain.Submission{},
 		judgingRuns: map[uuid.UUID]*domain.JudgingRun{},
+		balances:    map[[2]uuid.UUID]int{},
+		helperUsage: map[uuid.UUID]*domain.HelperUsage{},
 		rounds:      map[uuid.UUID]domain.Round{},
 		promptTests: map[uuid.UUID]*domain.PromptTest{},
 		usernames:   map[uuid.UUID]string{},
@@ -62,13 +68,14 @@ func (s *fakeGameStore) WithinTx(ctx context.Context, fn func(repository.TxRepos
 	}
 	rounds, scores := maps.Clone(s.rounds), slices.Clone(s.scores)
 	submissions, tests, runs := clonePtrs(s.submissions), clonePtrs(s.promptTests), clonePtrs(s.judgingRuns)
+	balances, usage := maps.Clone(s.balances), clonePtrs(s.helperUsage)
 	repos := repository.TxRepositories{
 		Games: fakeGameRepo{s}, Challenges: s.challenges, Submissions: fakeSubmissionRepo{s},
-		PromptTests: fakePromptTestRepo{s}, Judging: fakeJudgingRepo{s},
+		PromptTests: fakePromptTestRepo{s}, Judging: fakeJudgingRepo{s}, Helpers: fakeHelperRepo{s},
 	}
 	if err := fn(repos); err != nil {
 		s.games, s.submissions, s.rounds, s.promptTests = snapshot, submissions, rounds, tests
-		s.judgingRuns, s.scores = runs, scores
+		s.judgingRuns, s.scores, s.balances, s.helperUsage = runs, scores, balances, usage
 		return err
 	}
 	return nil
@@ -157,6 +164,10 @@ func (r fakeGameRepo) GetByID(_ context.Context, id uuid.UUID) (*domain.Game, er
 }
 
 func (r fakeGameRepo) LockByID(ctx context.Context, id uuid.UUID) (*domain.Game, error) {
+	return r.GetByID(ctx, id)
+}
+
+func (r fakeGameRepo) LockSharedByID(ctx context.Context, id uuid.UUID) (*domain.Game, error) {
 	return r.GetByID(ctx, id)
 }
 
@@ -404,6 +415,117 @@ func (r fakeJudgingRepo) ListScores(_ context.Context, roundID uuid.UUID) ([]dom
 		}
 		return strings.Compare(a.PlayerID.String(), b.PlayerID.String())
 	})
+	return out, nil
+}
+
+// fakeHelperRepo follows the PostgreSQL rules: a conditional debit, one
+// usage per player and key, and status changes only from reserved.
+type fakeHelperRepo struct{ s *fakeGameStore }
+
+func (r fakeHelperRepo) EnsureBalance(_ context.Context, gameID, playerID uuid.UUID, balance int, _ time.Time) error {
+	if _, ok := r.s.balances[[2]uuid.UUID{gameID, playerID}]; !ok {
+		r.s.balances[[2]uuid.UUID{gameID, playerID}] = balance
+	}
+	return nil
+}
+
+func (r fakeHelperRepo) GetBalance(_ context.Context, gameID, playerID uuid.UUID) (int, error) {
+	b, ok := r.s.balances[[2]uuid.UUID{gameID, playerID}]
+	if !ok {
+		return 0, domain.ErrNotFound
+	}
+	return b, nil
+}
+
+func (r fakeHelperRepo) Debit(_ context.Context, gameID, playerID uuid.UUID, cost int, _ time.Time) (int, bool, error) {
+	key := [2]uuid.UUID{gameID, playerID}
+	b, ok := r.s.balances[key]
+	if !ok || b < cost {
+		return 0, false, nil
+	}
+	r.s.balances[key] = b - cost
+	return b - cost, true, nil
+}
+
+func (r fakeHelperRepo) Credit(_ context.Context, gameID, playerID uuid.UUID, amount int, _ time.Time) (int, error) {
+	key := [2]uuid.UUID{gameID, playerID}
+	if _, ok := r.s.balances[key]; !ok {
+		return 0, domain.ErrNotFound
+	}
+	r.s.balances[key] += amount
+	return r.s.balances[key], nil
+}
+
+func (r fakeHelperRepo) CreateUsage(_ context.Context, u *domain.HelperUsage) (bool, error) {
+	for _, other := range r.s.helperUsage {
+		if other.PlayerID == u.PlayerID && other.IdempotencyKey == u.IdempotencyKey {
+			return false, nil
+		}
+	}
+	u.ID = uuid.New()
+	c := *u
+	r.s.helperUsage[u.ID] = &c
+	return true, nil
+}
+
+func (r fakeHelperRepo) GetUsage(_ context.Context, id uuid.UUID) (*domain.HelperUsage, error) {
+	u, ok := r.s.helperUsage[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	c := *u
+	return &c, nil
+}
+
+func (r fakeHelperRepo) GetUsageByKey(_ context.Context, playerID uuid.UUID, key string) (*domain.HelperUsage, error) {
+	for _, u := range r.s.helperUsage {
+		if u.PlayerID == playerID && u.IdempotencyKey == key {
+			c := *u
+			return &c, nil
+		}
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (r fakeHelperRepo) Deliver(_ context.Context, id uuid.UUID, d domain.HelperDelivery) error {
+	if r.s.failDeliver {
+		return errors.New("database unavailable")
+	}
+	u, ok := r.s.helperUsage[id]
+	if !ok || u.Status != domain.HelperReserved {
+		return domain.ErrStaleGameState
+	}
+	u.Status, u.Content, u.Provider, u.Model, u.DeliveredAt = domain.HelperDelivered, d.Content, d.Provider, d.Model, &d.DeliveredAt
+	return nil
+}
+
+func (r fakeHelperRepo) MarkRefunded(_ context.Context, id uuid.UUID, code string, at time.Time) (bool, error) {
+	u, ok := r.s.helperUsage[id]
+	if !ok || u.Status != domain.HelperReserved {
+		return false, nil
+	}
+	u.Status, u.ErrorCode, u.RefundedAt = domain.HelperRefunded, code, &at
+	return true, nil
+}
+
+func (r fakeHelperRepo) ListUsage(_ context.Context, roundID, playerID uuid.UUID) ([]domain.HelperUsage, error) {
+	out := []domain.HelperUsage{}
+	for _, u := range r.s.helperUsage {
+		if u.RoundID == roundID && u.PlayerID == playerID {
+			out = append(out, *u)
+		}
+	}
+	slices.SortFunc(out, func(a, b domain.HelperUsage) int { return a.CreatedAt.Compare(b.CreatedAt) })
+	return out, nil
+}
+
+func (r fakeHelperRepo) ListStaleReservations(_ context.Context, before time.Time) ([]domain.HelperUsage, error) {
+	out := []domain.HelperUsage{}
+	for _, u := range r.s.helperUsage {
+		if u.Status == domain.HelperReserved && u.CreatedAt.Before(before) {
+			out = append(out, *u)
+		}
+	}
 	return out, nil
 }
 

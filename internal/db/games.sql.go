@@ -414,6 +414,19 @@ func (q *Queries) LockGameByID(ctx context.Context, id pgtype.UUID) (pgtype.UUID
 	return id_2, err
 }
 
+const LockGameShared = `-- name: LockGameShared :one
+SELECT id FROM games WHERE id = $1 FOR SHARE
+`
+
+// A shared lock: it waits for, and holds off, engine transitions (which lock
+// FOR UPDATE), while other shared lockers proceed in parallel.
+func (q *Queries) LockGameShared(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, LockGameShared, id)
+	var id_2 pgtype.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
 const RemoveGamePlayer = `-- name: RemoveGamePlayer :execrows
 DELETE FROM game_players WHERE game_id = $1 AND user_id = $2
 `

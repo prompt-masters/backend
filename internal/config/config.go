@@ -73,6 +73,7 @@ type Config struct {
 	AI          ai.Config
 	PromptTests PromptTestConfig
 	Judging     JudgingConfig
+	Helpers     HelperConfig
 	// ResultsDuration is how long a round's results are shown before the
 	// game moves on by itself.
 	ResultsDuration time.Duration
@@ -209,6 +210,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.Judging, err = loadJudging(); err != nil {
 		return nil, fmt.Errorf("invalid judging config: %w", err)
+	}
+	if cfg.Helpers, err = loadHelpers(); err != nil {
+		return nil, fmt.Errorf("invalid helper config: %w", err)
 	}
 	if cfg.ResultsDuration = envDuration("RESULTS_DURATION", defaultResultsDuration); cfg.ResultsDuration <= 0 {
 		return nil, errors.New("RESULTS_DURATION must be positive")

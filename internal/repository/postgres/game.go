@@ -81,6 +81,14 @@ func (r *GameRepository) LockByID(ctx context.Context, id uuid.UUID) (*domain.Ga
 	return r.GetByID(ctx, id)
 }
 
+// LockSharedByID locks first and reads afterwards, like LockByID.
+func (r *GameRepository) LockSharedByID(ctx context.Context, id uuid.UUID) (*domain.Game, error) {
+	if _, err := r.queries.LockGameShared(ctx, pgUUID(id)); err != nil {
+		return nil, translateGetError(err)
+	}
+	return r.GetByID(ctx, id)
+}
+
 func (r *GameRepository) GetActiveIDByRoomCode(ctx context.Context, roomCode string) (uuid.UUID, error) {
 	id, err := r.queries.GetActiveGameIDByRoomCode(ctx, roomCode)
 	if err != nil {

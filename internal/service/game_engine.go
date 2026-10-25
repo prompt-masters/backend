@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"slices"
 	"sync"
 	"time"
 
@@ -71,6 +72,8 @@ type GameEngine struct {
 	closed   bool
 	judge    RoundJudger
 	inflight sync.WaitGroup
+	// roundEnd is told when a round stops being active.
+	roundEnd []func(gameID, roundID uuid.UUID)
 }
 
 // RoundJudger scores a round once it has entered Judging. The engine calls it
@@ -104,6 +107,9 @@ type EngineOptions struct {
 	// ResultsDuration is how long a round's results are shown before the
 	// game moves on by itself; 0 leaves that to Advance's callers.
 	ResultsDuration time.Duration
+	// HelperBalance is the helper points every player gets when the game
+	// starts; 0 gives none.
+	HelperBalance int
 }
 
 func NewGameEngine(tx repository.Transactor, clock Clock, events GameEventPublisher, live LiveStateSyncer, logger *log.Logger, opts EngineOptions) *GameEngine {
@@ -123,6 +129,16 @@ func NewGameEngine(tx repository.Transactor, clock Clock, events GameEventPublis
 		stop:       stop,
 		games:      map[uuid.UUID]*engineGame{},
 	}
+}
+
+// OnRoundEnd registers fn to be told, right after the commit, whenever a
+// round stops being active (all submitted or time up). fn runs under the
+// game's transition lock, so it must only signal, never block. Register
+// during start-up.
+func (e *GameEngine) OnRoundEnd(fn func(gameID, roundID uuid.UUID)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.roundEnd = append(e.roundEnd, fn)
 }
 
 // SetJudge attaches the round judge. It exists because the judge needs the
@@ -506,6 +522,13 @@ func (e *GameEngine) apply(
 		if err := repos.Games.UpdateProgress(ctx, gameID, from, to); err != nil {
 			return err
 		}
+		if s.event == domain.GameEventStartGame && e.opts.HelperBalance > 0 {
+			for _, p := range locked.Players {
+				if err := repos.Helpers.EnsureBalance(ctx, gameID, p.UserID, e.opts.HelperBalance, now); err != nil {
+					return err
+				}
+			}
+		}
 		if to.RoundID != from.RoundID {
 			err := repos.Games.CreateRound(ctx, domain.Round{
 				ID: to.RoundID, GameID: gameID, Number: to.CurrentRound, ChallengeID: to.ChallengeID,
@@ -549,6 +572,14 @@ func (e *GameEngine) committed(ctx context.Context, from domain.GameProgress, ga
 		e.stopTimer(game.ID)
 	}
 
+	if from.Phase == domain.GamePhaseRoundActive && to.Phase != domain.GamePhaseRoundActive {
+		e.mu.Lock()
+		listeners := slices.Clone(e.roundEnd)
+		e.mu.Unlock()
+		for _, fn := range listeners {
+			fn(game.ID, from.RoundID)
+		}
+	}
 	if from.Phase.Status() != to.Phase.Status() {
 		e.live.SyncGame(ctx, game)
 	}
