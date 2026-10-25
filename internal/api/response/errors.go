@@ -23,7 +23,7 @@ func WriteDomainError(w http.ResponseWriter, logger *log.Logger, err error) {
 	case errors.As(err, &balanceErr):
 		WriteJSON(w, http.StatusPaymentRequired, Envelope{
 			"error": "Not enough helper points.", "error_code": "INSUFFICIENT_BALANCE",
-			"balance": balanceErr.Balance, "cost": balanceErr.Cost,
+			"remaining_balance": balanceErr.Balance, "cost": balanceErr.Cost,
 		})
 		return
 	case errors.As(err, &helperErr):

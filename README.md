@@ -586,7 +586,7 @@ and an **`Idempotency-Key`** header (required) answers `200`:
 | Status | `error_code` | When |
 | --- | --- | --- |
 | 400 | — | No `Idempotency-Key`, input too long, a missing draft, or an invalid `test_id` (`INVALID_TEST`) |
-| 402 | `INSUFFICIENT_BALANCE` | Body includes `balance` and `cost` |
+| 402 | `INSUFFICIENT_BALANCE` | Body includes `remaining_balance` (unchanged) and `cost` |
 | 403 | — | Not a player |
 | 409 | `ROUND_NOT_ACTIVE` / `ALREADY_SUBMITTED` | Not the active round, past the deadline, or after your final submission |
 | 409 | `IN_PROGRESS` | The same key is still being served |

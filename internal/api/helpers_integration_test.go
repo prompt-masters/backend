@@ -138,11 +138,12 @@ func TestHelpersSimultaneousPurchases(t *testing.T) {
 				remaining = append(remaining, decode[helperJSON](t, resp).RemainingBalance)
 			case http.StatusPaymentRequired:
 				var body struct {
-					ErrorCode string `json:"error_code"`
-					Balance   int    `json:"balance"`
+					ErrorCode        string `json:"error_code"`
+					RemainingBalance *int   `json:"remaining_balance"`
+					Cost             int    `json:"cost"`
 				}
 				_ = json.Unmarshal(resp.Body, &body)
-				if body.ErrorCode != "INSUFFICIENT_BALANCE" || body.Balance < 0 || body.Balance >= 15 {
+				if body.ErrorCode != "INSUFFICIENT_BALANCE" || body.RemainingBalance == nil || *body.RemainingBalance < 0 || *body.RemainingBalance >= 15 || body.Cost != 15 {
 					t.Errorf("refusal body = %s", resp.Body)
 				}
 				refused++
