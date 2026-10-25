@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -391,7 +392,7 @@ func TestHubTargetedSends(t *testing.T) {
 	bobClient := f.dial(gameID, bob, "bob")
 
 	// Both of Alice's tabs get her targeted event; Bob gets none.
-	f.hub.SendToUser(gameID, alice, mustEncode(t, OutputChunkPayload{RoundNumber: 1, TestNumber: 2, Chunk: "alice only"}))
+	f.hub.SendToUser(gameID, alice, mustEncode(t, OutputChunkPayload{TestID: "t1", TestNumber: 2, Seq: 1, Delta: "alice only"}))
 	for _, c := range []*client{aliceTab1, aliceTab2} {
 		env := c.next(time.Second)
 		if env.Type != TypeOutputChunk {
@@ -447,7 +448,10 @@ func TestHubCapsConnectionsPerUser(t *testing.T) {
 func TestHubDisconnectsSlowClientWithoutBlockingTheRoom(t *testing.T) {
 	cfg := testConfig()
 	cfg.SendBuffer = 16
-	cfg.WriteWait = 200 * time.Millisecond
+	// Long enough that a write blocked on the slow client is still blocked
+	// when its send buffer overflows, so it is dropped as too slow rather
+	// than by a write timeout.
+	cfg.WriteWait = 2 * time.Second
 	f := newHubFixture(t, cfg)
 	gameID := uuid.New()
 	slowID, fastID := uuid.New(), uuid.New()
@@ -455,19 +459,37 @@ func TestHubDisconnectsSlowClientWithoutBlockingTheRoom(t *testing.T) {
 	f.dialSilent(gameID, slowID, "slow")
 	fast := f.dial(gameID, fastID, "fast")
 
-	// Flood the room. The slow client's buffers fill and it is dropped, while
-	// the reading client keeps up.
-	big := strings.Repeat("x", 16<<10)
-	done := make(chan struct{})
+	// Flood the room in step with the reading client, so it never falls
+	// behind, until the slow client is dropped: once the kernel's socket
+	// buffers are full, however large they are, the slow client's writer
+	// blocks and its send buffer overflows.
+	msg := mustEncode(t, OutputCompletePayload{Output: strings.Repeat("x", 16<<10)})
+	flooded := make(chan error, 1)
 	go func() {
-		defer close(done)
-		for range 150 {
-			f.hub.Broadcast(gameID, mustEncode(t, OutputCompletePayload{Output: big}))
+		for range 2048 { // 32MB, more than any socket buffers hold
+			if f.hub.Connections(gameID) < 2 {
+				flooded <- nil
+				return
+			}
+			want := fast.received() + 1
+			f.hub.Broadcast(gameID, msg)
+			deadline := time.Now().Add(5 * time.Second)
+			for fast.received() < want {
+				if time.Now().After(deadline) {
+					flooded <- errors.New("the reading client stopped receiving")
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
 		}
+		flooded <- errors.New("the slow client was never dropped")
 	}()
 	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
+	case err := <-flooded:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
 		t.Fatal("broadcasting blocked on the slow client")
 	}
 
